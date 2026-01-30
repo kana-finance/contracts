@@ -10,18 +10,17 @@ import {IStrategy} from "./interfaces/IStrategy.sol";
 
 /// @title KanaVault
 /// @notice USDC yield aggregator vault on SEI. Users deposit USDC, the vault
-///         allocates to the highest-yielding strategy and auto-compounds rewards.
-/// @dev Implements ERC-4626 for composability. Strategies are pluggable.
+///         routes funds to a single strategy that allocates across lending
+///         protocols and auto-compounds rewards.
+/// @dev Implements ERC-4626. One strategy per asset — the strategy handles
+///      internal allocation across protocols (Yei, Takara, Morpho).
 contract KanaVault is ERC4626, Ownable {
     using SafeERC20 for IERC20;
 
     // ─── State ───────────────────────────────────────────────────────────
 
-    /// @notice List of registered strategies
-    IStrategy[] public strategies;
-
-    /// @notice Index of the currently active strategy (receives all deposits)
-    uint256 public activeStrategyIndex;
+    /// @notice The strategy that manages fund allocation across protocols
+    IStrategy public strategy;
 
     /// @notice Performance fee in basis points (10% = 1000)
     uint256 public performanceFeeBps;
@@ -39,21 +38,17 @@ contract KanaVault is ERC4626, Ownable {
 
     // ─── Events ──────────────────────────────────────────────────────────
 
-    event StrategyAdded(address indexed strategy, uint256 index);
-    event StrategyRemoved(address indexed strategy, uint256 index);
-    event ActiveStrategyChanged(uint256 indexed oldIndex, uint256 indexed newIndex);
+    event StrategySet(address indexed oldStrategy, address indexed newStrategy);
     event Harvest(uint256 profit, uint256 fee);
-    event Rebalanced(uint256 fromIndex, uint256 toIndex, uint256 amount);
     event PerformanceFeeUpdated(uint256 oldFee, uint256 newFee);
     event FeeRecipientUpdated(address oldRecipient, address newRecipient);
 
     // ─── Errors ──────────────────────────────────────────────────────────
 
-    error StrategyAlreadyAdded();
-    error StrategyNotFound();
     error InvalidFee();
     error InvalidAddress();
-    error NoStrategies();
+    error NoStrategy();
+    error StrategyAssetMismatch();
 
     // ─── Constructor ─────────────────────────────────────────────────────
 
@@ -78,99 +73,46 @@ contract KanaVault is ERC4626, Ownable {
 
     // ─── Strategy Management ─────────────────────────────────────────────
 
-    /// @notice Add a new strategy to the vault
-    /// @param _strategy Address of the strategy contract
-    function addStrategy(IStrategy _strategy) external onlyOwner {
-        for (uint256 i = 0; i < strategies.length; i++) {
-            if (address(strategies[i]) == address(_strategy)) {
-                revert StrategyAlreadyAdded();
+    /// @notice Set the strategy contract
+    /// @param _strategy Address of the strategy (must match vault asset)
+    function setStrategy(IStrategy _strategy) external onlyOwner {
+        if (address(_strategy) == address(0)) revert InvalidAddress();
+        if (_strategy.asset() != asset()) revert StrategyAssetMismatch();
+
+        address oldStrategy = address(strategy);
+
+        // If there's an existing strategy with funds, withdraw everything first
+        if (oldStrategy != address(0)) {
+            uint256 bal = strategy.balanceOf();
+            if (bal > 0) {
+                strategy.withdraw(bal);
             }
+            // Revoke approval
+            IERC20(asset()).approve(oldStrategy, 0);
         }
 
-        strategies.push(_strategy);
+        strategy = _strategy;
 
-        // Approve strategy to pull USDC from vault
+        // Approve new strategy
         IERC20(asset()).approve(address(_strategy), type(uint256).max);
 
-        emit StrategyAdded(address(_strategy), strategies.length - 1);
-    }
-
-    /// @notice Remove a strategy (must withdraw all funds first)
-    /// @param _index Index of the strategy to remove
-    function removeStrategy(uint256 _index) external onlyOwner {
-        if (_index >= strategies.length) revert StrategyNotFound();
-
-        // Withdraw all funds from the strategy first
-        IStrategy strategy = strategies[_index];
-        uint256 strategyBalance = strategy.balanceOf();
-        if (strategyBalance > 0) {
-            strategy.withdraw(strategyBalance);
+        // If vault has idle funds, deploy them to new strategy
+        uint256 idle = IERC20(asset()).balanceOf(address(this));
+        if (idle > 0 && address(_strategy) != address(0)) {
+            IERC20(asset()).safeTransfer(address(_strategy), idle);
+            _strategy.deposit(idle);
         }
 
-        // Revoke approval
-        IERC20(asset()).approve(address(strategy), 0);
-
-        emit StrategyRemoved(address(strategy), _index);
-
-        // Replace with last element and pop
-        strategies[_index] = strategies[strategies.length - 1];
-        strategies.pop();
-
-        // Adjust active index if needed
-        if (activeStrategyIndex == _index) {
-            activeStrategyIndex = 0;
-        } else if (activeStrategyIndex == strategies.length) {
-            activeStrategyIndex = _index;
-        }
-    }
-
-    /// @notice Set the active strategy that receives new deposits
-    /// @param _index Index of the strategy to activate
-    function setActiveStrategy(uint256 _index) external onlyOwner {
-        if (_index >= strategies.length) revert StrategyNotFound();
-
-        uint256 oldIndex = activeStrategyIndex;
-        activeStrategyIndex = _index;
-
-        emit ActiveStrategyChanged(oldIndex, _index);
-    }
-
-    // ─── Rebalancing ─────────────────────────────────────────────────────
-
-    /// @notice Rebalance funds from current strategy to a new best strategy
-    /// @param _newIndex Index of the strategy to rebalance into
-    function rebalance(uint256 _newIndex) external onlyOwner {
-        if (_newIndex >= strategies.length) revert StrategyNotFound();
-        if (_newIndex == activeStrategyIndex) return;
-
-        uint256 oldIndex = activeStrategyIndex;
-        IStrategy oldStrategy = strategies[oldIndex];
-        IStrategy newStrategy = strategies[_newIndex];
-
-        // Withdraw everything from old strategy
-        uint256 amount = oldStrategy.balanceOf();
-        if (amount > 0) {
-            oldStrategy.withdraw(amount);
-
-            // Deposit into new strategy
-            IERC20(asset()).safeTransfer(address(newStrategy), amount);
-            newStrategy.deposit(amount);
-        }
-
-        activeStrategyIndex = _newIndex;
-
-        emit Rebalanced(oldIndex, _newIndex, amount);
+        emit StrategySet(oldStrategy, address(_strategy));
     }
 
     // ─── Harvest ─────────────────────────────────────────────────────────
 
-    /// @notice Harvest rewards from the active strategy, take fees, compound
+    /// @notice Harvest rewards from the strategy, take fees, compound
     function harvest() external onlyOwner {
-        if (strategies.length == 0) revert NoStrategies();
+        if (address(strategy) == address(0)) revert NoStrategy();
 
-        IStrategy strategy = strategies[activeStrategyIndex];
-
-        // Harvest converts reward tokens → USDC and returns profit amount
+        // Harvest converts reward tokens → asset and returns profit amount
         uint256 profit = strategy.harvest();
 
         if (profit > 0) {
@@ -191,18 +133,18 @@ contract KanaVault is ERC4626, Ownable {
 
     // ─── ERC4626 Overrides ───────────────────────────────────────────────
 
-    /// @notice Total assets = vault balance + all strategy balances
+    /// @notice Total assets = vault balance + strategy balance
     function totalAssets() public view override returns (uint256) {
         uint256 total = IERC20(asset()).balanceOf(address(this));
 
-        for (uint256 i = 0; i < strategies.length; i++) {
-            total += strategies[i].balanceOf();
+        if (address(strategy) != address(0)) {
+            total += strategy.balanceOf();
         }
 
         return total;
     }
 
-    /// @dev After deposit, deploy funds to the active strategy
+    /// @dev After deposit, deploy funds to the strategy
     function _deposit(
         address caller,
         address receiver,
@@ -211,9 +153,8 @@ contract KanaVault is ERC4626, Ownable {
     ) internal override {
         super._deposit(caller, receiver, assets, shares);
 
-        // Deploy to active strategy if one exists
-        if (strategies.length > 0) {
-            IStrategy strategy = strategies[activeStrategyIndex];
+        // Deploy to strategy if one is set
+        if (address(strategy) != address(0)) {
             IERC20(asset()).safeTransfer(address(strategy), assets);
             strategy.deposit(assets);
         }
@@ -229,30 +170,13 @@ contract KanaVault is ERC4626, Ownable {
     ) internal override {
         uint256 vaultBalance = IERC20(asset()).balanceOf(address(this));
 
-        if (vaultBalance < assets && strategies.length > 0) {
+        if (vaultBalance < assets && address(strategy) != address(0)) {
             uint256 deficit = assets - vaultBalance;
-
-            // Pull from active strategy first
-            IStrategy strategy = strategies[activeStrategyIndex];
             uint256 available = strategy.balanceOf();
             uint256 toWithdraw = deficit > available ? available : deficit;
 
             if (toWithdraw > 0) {
                 strategy.withdraw(toWithdraw);
-            }
-
-            // If still not enough, pull from other strategies
-            if (toWithdraw < deficit) {
-                uint256 remaining = deficit - toWithdraw;
-                for (uint256 i = 0; i < strategies.length && remaining > 0; i++) {
-                    if (i == activeStrategyIndex) continue;
-                    available = strategies[i].balanceOf();
-                    toWithdraw = remaining > available ? available : remaining;
-                    if (toWithdraw > 0) {
-                        strategies[i].withdraw(toWithdraw);
-                        remaining -= toWithdraw;
-                    }
-                }
             }
         }
 
@@ -275,18 +199,5 @@ contract KanaVault is ERC4626, Ownable {
         address oldRecipient = feeRecipient;
         feeRecipient = _recipient;
         emit FeeRecipientUpdated(oldRecipient, _recipient);
-    }
-
-    // ─── View ────────────────────────────────────────────────────────────
-
-    /// @notice Number of registered strategies
-    function strategiesCount() external view returns (uint256) {
-        return strategies.length;
-    }
-
-    /// @notice Get the active strategy address
-    function activeStrategy() external view returns (IStrategy) {
-        if (strategies.length == 0) revert NoStrategies();
-        return strategies[activeStrategyIndex];
     }
 }
