@@ -82,7 +82,8 @@ contract USDCStrategyTest is Test {
             cToken: address(cToken),
             comptroller: address(comptroller),
             morpho: address(morpho),
-            router: address(router)
+            routerV2: address(router),
+            routerV3: address(0)
         });
         
         strategy = new USDCStrategy(
@@ -121,7 +122,8 @@ contract USDCStrategyTest is Test {
             cToken: address(cToken),
             comptroller: address(comptroller),
             morpho: address(morpho),
-            router: address(router)
+            routerV2: address(router),
+            routerV3: address(0)
         });
         
         vm.expectRevert(USDCStrategy.InvalidAddress.selector);
@@ -137,7 +139,8 @@ contract USDCStrategyTest is Test {
             cToken: address(cToken),
             comptroller: address(comptroller),
             morpho: address(morpho),
-            router: address(router)
+            routerV2: address(router),
+            routerV3: address(0)
         });
         
         vm.expectRevert(USDCStrategy.InvalidSplit.selector);
@@ -458,10 +461,10 @@ contract USDCStrategyTest is Test {
         assertEq(strategy.morphoMaxIterations(), 10);
     }
     
-    function test_setRouter() public {
+    function test_setRouterV2() public {
         address newRouter = makeAddr("newRouter");
-        strategy.setRouter(newRouter);
-        assertEq(address(strategy.router()), newRouter);
+        strategy.setRouterV2(newRouter);
+        assertEq(address(strategy.routerV2()), newRouter);
     }
     
     // ─── Emergency ───────────────────────────────────────────────────────
@@ -598,7 +601,7 @@ contract USDCStrategyTest is Test {
     
     function test_harvest_noRouter() public {
         // Set router to zero to test no-op swap path
-        strategy.setRouter(address(0));
+        strategy.setRouterV2(address(0));
         
         // Setup reward config anyway
         address[] memory path = new address[](2);
@@ -748,7 +751,8 @@ contract USDCStrategyTest is Test {
             cToken: address(cToken),
             comptroller: address(comptroller),
             morpho: address(morpho),
-            router: address(router)
+            routerV2: address(router),
+            routerV3: address(0)
         });
         
         vm.expectRevert(USDCStrategy.InvalidAddress.selector);

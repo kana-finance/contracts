@@ -110,10 +110,39 @@ contract KanaVault is ERC4626, Ownable {
 
     /// @notice Harvest rewards from the strategy, take fees, compound
     function harvest() external onlyOwner {
+        _harvest(0, 0);
+    }
+
+    /// @notice Harvest with slippage protection for reward token swaps
+    /// @param takaraMinOut Minimum USDC expected from Takara reward swap
+    /// @param morphoMinOut Minimum USDC expected from Morpho reward swap
+    function harvestWithSlippage(
+        uint256 takaraMinOut,
+        uint256 morphoMinOut
+    ) external onlyOwner {
+        _harvest(takaraMinOut, morphoMinOut);
+    }
+
+    function _harvest(uint256 takaraMinOut, uint256 morphoMinOut) internal {
         if (address(strategy) == address(0)) revert NoStrategy();
 
         // Harvest converts reward tokens → asset and returns profit amount
-        uint256 profit = strategy.harvest();
+        uint256 profit;
+        if (takaraMinOut > 0 || morphoMinOut > 0) {
+            // Use slippage-protected version
+            // Cast to USDCStrategy to call harvestWithSlippage
+            (bool success, bytes memory data) = address(strategy).call(
+                abi.encodeWithSignature(
+                    "harvestWithSlippage(uint256,uint256)",
+                    takaraMinOut,
+                    morphoMinOut
+                )
+            );
+            require(success, "Harvest failed");
+            profit = abi.decode(data, (uint256));
+        } else {
+            profit = strategy.harvest();
+        }
 
         if (profit > 0) {
             // Calculate and collect performance fee
@@ -193,11 +222,26 @@ contract KanaVault is ERC4626, Ownable {
         emit PerformanceFeeUpdated(oldFee, _feeBps);
     }
 
-    /// @notice Update fee recipient
+    /// @notice Whether the fee recipient is permanently locked
+    bool public feeRecipientLocked;
+
+    /// @notice Update fee recipient (only if not locked)
     function setFeeRecipient(address _recipient) external onlyOwner {
+        if (feeRecipientLocked) revert FeeRecipientIsLocked();
         if (_recipient == address(0)) revert InvalidAddress();
         address oldRecipient = feeRecipient;
         feeRecipient = _recipient;
         emit FeeRecipientUpdated(oldRecipient, _recipient);
     }
+
+    /// @notice Permanently lock the fee recipient (irreversible)
+    /// @dev Used when switching from team multisig to staking contract
+    function lockFeeRecipient() external onlyOwner {
+        if (feeRecipient == address(0)) revert InvalidAddress();
+        feeRecipientLocked = true;
+        emit FeeRecipientLocked(feeRecipient);
+    }
+
+    event FeeRecipientLocked(address recipient);
+    error FeeRecipientIsLocked();
 }
