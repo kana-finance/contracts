@@ -16,12 +16,43 @@ import {ISwapRouterV3} from "./interfaces/external/ISwapRouterV3.sol";
 
 /// @title USDCStrategy
 /// @notice Single strategy that manages USDC across multiple SEI lending
-///         protocols: Yei (Aave V3 fork), Takara (Compound fork), and Morpho.
+///         protocols with dynamic yield sources and DEX routers.
 ///         Allocation splits are configurable. Keeper can trigger operations;
 ///         owner (multisig) retains full admin control.
 /// @dev Includes on-chain max slippage cap and rebalance cooldown for safety.
 contract USDCStrategy is IStrategy, Ownable {
     using SafeERC20 for IERC20;
+
+    // ─── Enums ───────────────────────────────────────────────────────────
+
+    /// @notice Protocol type enum
+    enum ProtocolType { Aave, Compound, Morpho }
+
+    /// @notice Router type enum
+    enum RouterType { V2, V3 }
+
+    // ─── Structs ─────────────────────────────────────────────────────────
+
+    /// @notice Yield source configuration
+    struct YieldSource {
+        ProtocolType protocolType;
+        bool enabled;
+        uint256 split; // basis points
+        address protocolAddress; // yeiPool for Aave, cToken for Compound, morpho for Morpho
+        address receiptToken; // aToken for Aave, cToken for Compound, unused for Morpho
+        address comptroller; // Only for Compound
+        address rewardToken;
+        address[] swapPath;
+        uint256 morphoMaxIterations; // Only for Morpho
+    }
+
+    /// @notice DEX router configuration
+    struct DexRouter {
+        address routerAddress;
+        RouterType routerType;
+        bool enabled;
+        string label;
+    }
 
     // ─── State ───────────────────────────────────────────────────────────
 
@@ -34,25 +65,14 @@ contract USDCStrategy is IStrategy, Ownable {
     /// @notice Keeper address — can trigger harvest, rebalance, claims
     address public keeper;
 
-    // ─── Protocol References ─────────────────────────────────────────────
+    /// @notice Dynamic yield sources
+    YieldSource[] public yieldSources;
 
-    IAavePool public immutable yeiPool;
-    IAToken public immutable aToken;
-    ICErc20 public immutable cToken;
-    IComptroller public immutable comptroller;
-    IMorpho public immutable morpho;
+    /// @notice Dynamic DEX routers
+    DexRouter[] public routers;
 
-    /// @notice Router type enum
-    enum RouterType { V2, V3 }
-
-    /// @notice V2 DEX router (DragonSwap)
-    ISailorRouter public routerV2;
-
-    /// @notice V3 DEX router (Sailor Finance)
-    ISwapRouterV3 public routerV3;
-
-    /// @notice Which router to use for swaps
-    RouterType public activeRouter;
+    /// @notice Active router index
+    uint256 public activeRouterIndex;
 
     /// @notice V3 pool fee tier (default 3000 = 0.3%)
     uint24 public v3PoolFee = 3000;
@@ -60,16 +80,9 @@ contract USDCStrategy is IStrategy, Ownable {
     /// @notice Merkl distributor for Morpho rewards
     IMerklDistributor public merklDistributor;
 
-    // ─── Allocation ──────────────────────────────────────────────────────
-
-    uint256 public splitYei;
-    uint256 public splitTakara;
-    uint256 public splitMorpho;
+    // ─── Constants ───────────────────────────────────────────────────────
 
     uint256 public constant SPLIT_TOTAL = 10000; // 100%
-
-    /// @notice Morpho P2P matching iterations
-    uint256 public morphoMaxIterations;
 
     // ─── Safety: Slippage Cap ────────────────────────────────────────────
 
@@ -94,19 +107,19 @@ contract USDCStrategy is IStrategy, Ownable {
     /// @notice Timestamp of last splits change
     uint256 public lastSplitsTime;
 
-    // ─── Reward Config ───────────────────────────────────────────────────
-
-    address public takaraRewardToken;
-    address[] public takaraSwapPath;
-    address public morphoRewardToken;
-    address[] public morphoSwapPath;
-
     // ─── Events ──────────────────────────────────────────────────────────
 
     event Deposited(uint256 amount);
     event Withdrawn(uint256 amount);
     event Harvested(uint256 profit);
-    event SplitUpdated(uint256 yei, uint256 takara, uint256 morpho);
+    event SplitUpdated(uint256 yei, uint256 takara, uint256 morpho); // Legacy event
+    event YieldSourceAdded(uint256 indexed index, ProtocolType protocolType);
+    event YieldSourceRemoved(uint256 indexed index);
+    event YieldSourceSplitUpdated(uint256 indexed index, uint256 newSplit);
+    event YieldSourceEnabled(uint256 indexed index, bool enabled);
+    event RouterAdded(uint256 indexed index, address routerAddress, RouterType routerType);
+    event RouterRemoved(uint256 indexed index);
+    event ActiveRouterSet(uint256 indexed index);
     event Rebalanced();
     event VaultUpdated(address indexed oldVault, address indexed newVault);
     event KeeperUpdated(address indexed oldKeeper, address indexed newKeeper);
@@ -119,6 +132,7 @@ contract USDCStrategy is IStrategy, Ownable {
     error OnlyVault();
     error InvalidAddress();
     error InvalidSplit();
+    error InvalidIndex();
     error MintFailed(uint256 errorCode);
     error RedeemFailed(uint256 errorCode);
     error NotKeeperOrOwner();
@@ -126,6 +140,7 @@ contract USDCStrategy is IStrategy, Ownable {
     error RebalanceCooldownActive(uint256 nextAllowed);
     error SplitsCooldownActive(uint256 nextAllowed);
     error SlippageTooHigh();
+    error InvalidMinAmountsLength();
 
     // ─── Modifiers ───────────────────────────────────────────────────────
 
@@ -169,27 +184,80 @@ contract USDCStrategy is IStrategy, Ownable {
 
         usdc = IERC20(addrs.usdc);
         vault = addrs.vault;
-        yeiPool = IAavePool(addrs.yeiPool);
-        aToken = IAToken(addrs.aToken);
-        cToken = ICErc20(addrs.cToken);
-        comptroller = IComptroller(addrs.comptroller);
-        morpho = IMorpho(addrs.morpho);
-        routerV2 = ISailorRouter(addrs.routerV2);
-        routerV3 = ISwapRouterV3(addrs.routerV3);
-        activeRouter = addrs.routerV2 != address(0) ? RouterType.V2 : RouterType.V3;
-
-        splitYei = _splitYei;
-        splitTakara = _splitTakara;
-        splitMorpho = _splitMorpho;
-        morphoMaxIterations = _morphoMaxIterations;
         maxSlippageBps = _maxSlippageBps;
         rebalanceCooldown = _rebalanceCooldown;
         splitsCooldown = _splitsCooldown;
 
-        // Pre-approve protocols
-        IERC20(addrs.usdc).safeIncreaseAllowance(addrs.yeiPool, type(uint256).max);
-        IERC20(addrs.usdc).safeIncreaseAllowance(addrs.cToken, type(uint256).max);
-        IERC20(addrs.usdc).safeIncreaseAllowance(addrs.morpho, type(uint256).max);
+        // Initialize with 3 default yield sources (backward compatible)
+        // 1. Yei (Aave)
+        if (addrs.yeiPool != address(0) && addrs.aToken != address(0)) {
+            yieldSources.push(YieldSource({
+                protocolType: ProtocolType.Aave,
+                enabled: _splitYei > 0,
+                split: _splitYei,
+                protocolAddress: addrs.yeiPool,
+                receiptToken: addrs.aToken,
+                comptroller: address(0),
+                rewardToken: address(0),
+                swapPath: new address[](0),
+                morphoMaxIterations: 0
+            }));
+            IERC20(addrs.usdc).safeIncreaseAllowance(addrs.yeiPool, type(uint256).max);
+        }
+
+        // 2. Takara (Compound)
+        if (addrs.cToken != address(0) && addrs.comptroller != address(0)) {
+            yieldSources.push(YieldSource({
+                protocolType: ProtocolType.Compound,
+                enabled: _splitTakara > 0,
+                split: _splitTakara,
+                protocolAddress: addrs.cToken,
+                receiptToken: addrs.cToken,
+                comptroller: addrs.comptroller,
+                rewardToken: address(0),
+                swapPath: new address[](0),
+                morphoMaxIterations: 0
+            }));
+            IERC20(addrs.usdc).safeIncreaseAllowance(addrs.cToken, type(uint256).max);
+        }
+
+        // 3. Morpho
+        if (addrs.morpho != address(0)) {
+            yieldSources.push(YieldSource({
+                protocolType: ProtocolType.Morpho,
+                enabled: _splitMorpho > 0,
+                split: _splitMorpho,
+                protocolAddress: addrs.morpho,
+                receiptToken: address(0),
+                comptroller: address(0),
+                rewardToken: address(0),
+                swapPath: new address[](0),
+                morphoMaxIterations: _morphoMaxIterations
+            }));
+            IERC20(addrs.usdc).safeIncreaseAllowance(addrs.morpho, type(uint256).max);
+        }
+
+        // Initialize routers
+        if (addrs.routerV2 != address(0)) {
+            routers.push(DexRouter({
+                routerAddress: addrs.routerV2,
+                routerType: RouterType.V2,
+                enabled: true,
+                label: "DragonSwap"
+            }));
+        }
+
+        if (addrs.routerV3 != address(0)) {
+            routers.push(DexRouter({
+                routerAddress: addrs.routerV3,
+                routerType: RouterType.V3,
+                enabled: true,
+                label: "Sailor"
+            }));
+        }
+
+        // Set active router to first available
+        activeRouterIndex = 0;
     }
 
     // ─── IStrategy Implementation ────────────────────────────────────────
@@ -208,20 +276,20 @@ contract USDCStrategy is IStrategy, Ownable {
     }
 
     /// @inheritdoc IStrategy
-    /// @dev Interface compatibility — calls harvest with 0 minAmounts (no slippage protection)
+    /// @dev Interface compatibility — calls harvest with empty minAmounts (no slippage protection)
     function harvest() external override onlyVault returns (uint256 profit) {
-        profit = _harvestAll(0, 0);
+        uint256[] memory minAmounts = new uint256[](yieldSources.length);
+        profit = _harvestAll(minAmounts);
         emit Harvested(profit);
     }
 
     /// @notice Harvest with slippage protection
-    /// @param takaraMinOut Minimum USDC expected from Takara reward swap
-    /// @param morphoMinOut Minimum USDC expected from Morpho reward swap
+    /// @param minAmountsOut Minimum USDC expected from each yield source's reward swap
     function harvest(
-        uint256 takaraMinOut,
-        uint256 morphoMinOut
+        uint256[] calldata minAmountsOut
     ) external onlyVault returns (uint256 profit) {
-        profit = _harvestAll(takaraMinOut, morphoMinOut);
+        if (minAmountsOut.length != yieldSources.length) revert InvalidMinAmountsLength();
+        profit = _harvestAll(minAmountsOut);
         emit Harvested(profit);
     }
 
@@ -238,19 +306,26 @@ contract USDCStrategy is IStrategy, Ownable {
     // ─── Internal: Deploy ────────────────────────────────────────────────
 
     function _deployToProtocols(uint256 amount) internal {
-        uint256 toYei = (amount * splitYei) / SPLIT_TOTAL;
-        uint256 toTakara = (amount * splitTakara) / SPLIT_TOTAL;
-        uint256 toMorpho = amount - toYei - toTakara;
+        for (uint256 i = 0; i < yieldSources.length; i++) {
+            YieldSource storage source = yieldSources[i];
+            if (!source.enabled) continue;
 
-        if (toYei > 0) {
-            yeiPool.supply(address(usdc), toYei, address(this), 0);
-        }
-        if (toTakara > 0) {
-            uint256 err = cToken.mint(toTakara);
-            if (err != 0) revert MintFailed(err);
-        }
-        if (toMorpho > 0) {
-            morpho.supply(address(usdc), toMorpho, address(this), morphoMaxIterations);
+            uint256 toSource = (amount * source.split) / SPLIT_TOTAL;
+            if (toSource == 0) continue;
+
+            if (source.protocolType == ProtocolType.Aave) {
+                IAavePool(source.protocolAddress).supply(address(usdc), toSource, address(this), 0);
+            } else if (source.protocolType == ProtocolType.Compound) {
+                uint256 err = ICErc20(source.protocolAddress).mint(toSource);
+                if (err != 0) revert MintFailed(err);
+            } else if (source.protocolType == ProtocolType.Morpho) {
+                IMorpho(source.protocolAddress).supply(
+                    address(usdc), 
+                    toSource, 
+                    address(this), 
+                    source.morphoMaxIterations
+                );
+            }
         }
     }
 
@@ -260,54 +335,89 @@ contract USDCStrategy is IStrategy, Ownable {
         uint256 total = _totalBalance();
         if (total == 0) return;
 
-        uint256 yeiBalance = _yeiBalance();
-        uint256 takaraBalance = _takaraBalance();
+        for (uint256 i = 0; i < yieldSources.length; i++) {
+            YieldSource storage source = yieldSources[i];
+            if (!source.enabled) continue;
 
-        uint256 fromYei = (amount * yeiBalance) / total;
-        uint256 fromTakara = (amount * takaraBalance) / total;
-        uint256 fromMorpho = amount - fromYei - fromTakara;
+            uint256 sourceBalance = _getSourceBalance(source);
+            if (sourceBalance == 0) continue;
 
-        if (fromYei > 0 && yeiBalance > 0) {
-            uint256 actual = fromYei > yeiBalance ? yeiBalance : fromYei;
-            yeiPool.withdraw(address(usdc), actual, address(this));
+            uint256 fromSource = (amount * sourceBalance) / total;
+            if (fromSource == 0) continue;
+
+            uint256 actual = fromSource > sourceBalance ? sourceBalance : fromSource;
+
+            if (source.protocolType == ProtocolType.Aave) {
+                IAavePool(source.protocolAddress).withdraw(address(usdc), actual, address(this));
+            } else if (source.protocolType == ProtocolType.Compound) {
+                uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(actual);
+                if (err != 0) revert RedeemFailed(err);
+            } else if (source.protocolType == ProtocolType.Morpho) {
+                IMorpho(source.protocolAddress).withdraw(
+                    address(usdc), 
+                    actual, 
+                    address(this), 
+                    source.morphoMaxIterations
+                );
+            }
         }
-        if (fromTakara > 0 && takaraBalance > 0) {
-            uint256 actual = fromTakara > takaraBalance ? takaraBalance : fromTakara;
-            uint256 err = cToken.redeemUnderlying(actual);
-            if (err != 0) revert RedeemFailed(err);
-        }
-        uint256 morphoBalance = _morphoBalance();
-        if (fromMorpho > 0 && morphoBalance > 0) {
-            uint256 actual = fromMorpho > morphoBalance ? morphoBalance : fromMorpho;
-            morpho.withdraw(address(usdc), actual, address(this), morphoMaxIterations);
+
+        // Handle any remaining deficit due to rounding by pulling from first available protocol
+        uint256 balance = usdc.balanceOf(address(this));
+        if (balance < amount) {
+            uint256 deficit = amount - balance;
+            
+            for (uint256 i = 0; i < yieldSources.length; i++) {
+                YieldSource storage source = yieldSources[i];
+                if (!source.enabled) continue;
+
+                uint256 sourceBalance = _getSourceBalance(source);
+                if (sourceBalance == 0) continue;
+
+                uint256 toWithdraw = deficit > sourceBalance ? sourceBalance : deficit;
+
+                if (source.protocolType == ProtocolType.Aave) {
+                    IAavePool(source.protocolAddress).withdraw(address(usdc), toWithdraw, address(this));
+                } else if (source.protocolType == ProtocolType.Compound) {
+                    uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(toWithdraw);
+                    if (err != 0) revert RedeemFailed(err);
+                } else if (source.protocolType == ProtocolType.Morpho) {
+                    IMorpho(source.protocolAddress).withdraw(
+                        address(usdc), 
+                        toWithdraw, 
+                        address(this), 
+                        source.morphoMaxIterations
+                    );
+                }
+
+                balance = usdc.balanceOf(address(this));
+                if (balance >= amount) break;
+            }
         }
     }
 
     // ─── Internal: Harvest ───────────────────────────────────────────────
 
-    function _harvestAll(uint256 takaraMinOut, uint256 morphoMinOut) internal returns (uint256 profit) {
+    function _harvestAll(uint256[] memory minAmountsOut) internal returns (uint256 profit) {
         uint256 balanceBefore = usdc.balanceOf(address(this));
 
-        // 1. Yei: interest accrues automatically in aToken balance
+        for (uint256 i = 0; i < yieldSources.length; i++) {
+            YieldSource storage source = yieldSources[i];
+            if (!source.enabled) continue;
 
-        // 2. Takara: claim COMP-style rewards
-        if (takaraRewardToken != address(0)) {
-            comptroller.claimComp(address(this));
-            uint256 rewardBal = IERC20(takaraRewardToken).balanceOf(address(this));
-            if (rewardBal > 0 && takaraSwapPath.length >= 2) {
-                // Enforce on-chain slippage cap against reward amount
-                if (takaraMinOut > 0) _validateSlippage(rewardBal, takaraMinOut);
-                _swap(takaraRewardToken, rewardBal, takaraSwapPath, takaraMinOut);
+            // Handle protocol-specific reward claiming
+            if (source.protocolType == ProtocolType.Compound && source.comptroller != address(0)) {
+                IComptroller(source.comptroller).claimComp(address(this));
             }
-        }
 
-        // 3. Morpho: swap any reward tokens already claimed via claimMorphoRewards()
-        if (morphoRewardToken != address(0)) {
-            uint256 rewardBal = IERC20(morphoRewardToken).balanceOf(address(this));
-            if (rewardBal > 0 && morphoSwapPath.length >= 2) {
-                // Enforce on-chain slippage cap against reward amount
-                if (morphoMinOut > 0) _validateSlippage(rewardBal, morphoMinOut);
-                _swap(morphoRewardToken, rewardBal, morphoSwapPath, morphoMinOut);
+            // Swap rewards if configured
+            if (source.rewardToken != address(0) && source.swapPath.length >= 2) {
+                uint256 rewardBal = IERC20(source.rewardToken).balanceOf(address(this));
+                if (rewardBal > 0) {
+                    uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
+                    if (minOut > 0) _validateSlippage(rewardBal, minOut);
+                    _swap(source.rewardToken, rewardBal, source.swapPath, minOut);
+                }
             }
         }
 
@@ -341,11 +451,17 @@ contract USDCStrategy is IStrategy, Ownable {
         uint256 minAmountOut
     ) internal {
         if (amountIn == 0 || path.length < 2) return;
+        if (routers.length == 0 || activeRouterIndex >= routers.length) return;
+
+        DexRouter storage router = routers[activeRouterIndex];
+        if (!router.enabled || router.routerAddress == address(0)) return;
+
         address[] memory memPath = new address[](path.length);
         for (uint256 i = 0; i < path.length; i++) {
             memPath[i] = path[i];
         }
-        _executeSwap(tokenIn, memPath[memPath.length - 1], amountIn, minAmountOut, memPath);
+
+        _executeSwap(router, tokenIn, memPath[memPath.length - 1], amountIn, minAmountOut, memPath);
     }
 
     function _swapDynamic(
@@ -355,31 +471,36 @@ contract USDCStrategy is IStrategy, Ownable {
         uint256 minAmountOut
     ) internal {
         if (amountIn == 0 || path.length < 2) return;
+        if (routers.length == 0 || activeRouterIndex >= routers.length) return;
+
+        DexRouter storage router = routers[activeRouterIndex];
+        if (!router.enabled || router.routerAddress == address(0)) return;
+
         address[] memory swapPath = new address[](path.length);
         swapPath[0] = tokenIn;
         for (uint256 i = 1; i < path.length; i++) {
             swapPath[i] = path[i];
         }
-        _executeSwap(tokenIn, swapPath[swapPath.length - 1], amountIn, minAmountOut, swapPath);
+
+        _executeSwap(router, tokenIn, swapPath[swapPath.length - 1], amountIn, minAmountOut, swapPath);
     }
 
     function _executeSwap(
+        DexRouter storage router,
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
         uint256 minAmountOut,
         address[] memory path
     ) internal {
-        if (activeRouter == RouterType.V2) {
-            if (address(routerV2) == address(0)) return;
-            IERC20(tokenIn).safeIncreaseAllowance(address(routerV2), amountIn);
-            routerV2.swapExactTokensForTokens(
+        IERC20(tokenIn).safeIncreaseAllowance(router.routerAddress, amountIn);
+
+        if (router.routerType == RouterType.V2) {
+            ISailorRouter(router.routerAddress).swapExactTokensForTokens(
                 amountIn, minAmountOut, path, address(this), block.timestamp
             );
         } else {
-            if (address(routerV3) == address(0)) return;
-            IERC20(tokenIn).safeIncreaseAllowance(address(routerV3), amountIn);
-            routerV3.exactInputSingle(
+            ISwapRouterV3(router.routerAddress).exactInputSingle(
                 ISwapRouterV3.ExactInputSingleParams({
                     tokenIn: tokenIn,
                     tokenOut: tokenOut,
@@ -396,31 +517,229 @@ contract USDCStrategy is IStrategy, Ownable {
 
     // ─── Internal: Balance Helpers ───────────────────────────────────────
 
-    function _yeiBalance() internal view returns (uint256) {
-        return aToken.balanceOf(address(this));
+    function _getSourceBalance(YieldSource storage source) internal view returns (uint256) {
+        if (source.protocolType == ProtocolType.Aave) {
+            return IAToken(source.receiptToken).balanceOf(address(this));
+        } else if (source.protocolType == ProtocolType.Compound) {
+            uint256 cTokenBal = IERC20(source.receiptToken).balanceOf(address(this));
+            if (cTokenBal == 0) return 0;
+            uint256 exchangeRate = ICErc20(source.receiptToken).exchangeRateStored();
+            return (cTokenBal * exchangeRate) / 1e18;
+        } else if (source.protocolType == ProtocolType.Morpho) {
+            return IMorpho(source.protocolAddress).supplyBalance(address(usdc), address(this));
+        }
+        return 0;
     }
 
-    function _takaraBalance() internal view returns (uint256) {
-        uint256 cTokenBal = cToken.balanceOf(address(this));
-        if (cTokenBal == 0) return 0;
-        uint256 exchangeRate = cToken.exchangeRateStored();
-        return (cTokenBal * exchangeRate) / 1e18;
+    function _totalBalance() internal view returns (uint256 total) {
+        for (uint256 i = 0; i < yieldSources.length; i++) {
+            if (yieldSources[i].enabled) {
+                total += _getSourceBalance(yieldSources[i]);
+            }
+        }
+        total += usdc.balanceOf(address(this));
     }
 
-    function _morphoBalance() internal view returns (uint256) {
-        return morpho.supplyBalance(address(usdc), address(this));
+    // ─── Yield Source Management ─────────────────────────────────────────
+
+    /// @notice Add a new yield source (owner only)
+    function addYieldSource(
+        ProtocolType _protocolType,
+        bool _enabled,
+        uint256 _split,
+        address _protocolAddress,
+        address _receiptToken,
+        address _comptrollerAddress,
+        address _rewardToken,
+        address[] calldata _swapPath,
+        uint256 _morphoMaxIter
+    ) external onlyOwner {
+        if (_protocolAddress == address(0)) revert InvalidAddress();
+
+        // Validate total splits don't exceed SPLIT_TOTAL
+        uint256 totalSplit = _split;
+        for (uint256 i = 0; i < yieldSources.length; i++) {
+            totalSplit += yieldSources[i].split;
+        }
+        if (totalSplit != SPLIT_TOTAL) revert InvalidSplit();
+
+        yieldSources.push(YieldSource({
+            protocolType: _protocolType,
+            enabled: _enabled,
+            split: _split,
+            protocolAddress: _protocolAddress,
+            receiptToken: _receiptToken,
+            comptroller: _comptrollerAddress,
+            rewardToken: _rewardToken,
+            swapPath: _swapPath,
+            morphoMaxIterations: _morphoMaxIter
+        }));
+
+        // Approve protocol
+        usdc.safeIncreaseAllowance(_protocolAddress, type(uint256).max);
+
+        emit YieldSourceAdded(yieldSources.length - 1, _protocolType);
     }
 
-    function _totalBalance() internal view returns (uint256) {
-        return _yeiBalance() + _takaraBalance() + _morphoBalance()
-            + usdc.balanceOf(address(this));
+    /// @notice Remove a yield source (owner only)
+    /// @dev Does not reorder array, just sets split to 0 and disables
+    function removeYieldSource(uint256 index) external onlyOwner {
+        if (index >= yieldSources.length) revert InvalidIndex();
+        
+        yieldSources[index].enabled = false;
+        yieldSources[index].split = 0;
+
+        emit YieldSourceRemoved(index);
+    }
+
+    /// @notice Update yield source split (owner only)
+    function updateYieldSourceSplit(uint256 index, uint256 newSplit) external onlyOwner {
+        if (index >= yieldSources.length) revert InvalidIndex();
+        
+        // Check cooldown
+        if (lastSplitsTime > 0 && block.timestamp < lastSplitsTime + splitsCooldown) {
+            revert SplitsCooldownActive(lastSplitsTime + splitsCooldown);
+        }
+
+        // Validate total splits
+        uint256 totalSplit = newSplit;
+        for (uint256 i = 0; i < yieldSources.length; i++) {
+            if (i != index) {
+                totalSplit += yieldSources[i].split;
+            }
+        }
+        if (totalSplit != SPLIT_TOTAL) revert InvalidSplit();
+
+        yieldSources[index].split = newSplit;
+        lastSplitsTime = block.timestamp;
+
+        emit YieldSourceSplitUpdated(index, newSplit);
+    }
+
+    /// @notice Enable/disable a yield source (owner only)
+    function setYieldSourceEnabled(uint256 index, bool enabled) external onlyOwner {
+        if (index >= yieldSources.length) revert InvalidIndex();
+        yieldSources[index].enabled = enabled;
+        emit YieldSourceEnabled(index, enabled);
+    }
+
+    /// @notice Update yield source reward config (owner only)
+    function setYieldSourceRewardConfig(
+        uint256 index,
+        address _rewardToken,
+        address[] calldata _swapPath
+    ) external onlyOwner {
+        if (index >= yieldSources.length) revert InvalidIndex();
+        yieldSources[index].rewardToken = _rewardToken;
+        yieldSources[index].swapPath = _swapPath;
+    }
+
+    /// @notice Get yield source count
+    function yieldSourcesLength() external view returns (uint256) {
+        return yieldSources.length;
+    }
+
+    /// @notice Get yield source details
+    function getYieldSource(uint256 index) external view returns (
+        ProtocolType protocolType,
+        bool enabled,
+        uint256 split,
+        address protocolAddress,
+        address receiptToken,
+        address comptrollerAddr,
+        address rewardToken,
+        address[] memory swapPath,
+        uint256 morphoMaxIter
+    ) {
+        if (index >= yieldSources.length) revert InvalidIndex();
+        YieldSource storage source = yieldSources[index];
+        return (
+            source.protocolType,
+            source.enabled,
+            source.split,
+            source.protocolAddress,
+            source.receiptToken,
+            source.comptroller,
+            source.rewardToken,
+            source.swapPath,
+            source.morphoMaxIterations
+        );
+    }
+
+    // ─── Router Management ───────────────────────────────────────────────
+
+    /// @notice Add a new router (owner only)
+    function addRouter(
+        address _routerAddress,
+        RouterType _routerType,
+        string calldata _label
+    ) external onlyOwner {
+        if (_routerAddress == address(0)) revert InvalidAddress();
+
+        routers.push(DexRouter({
+            routerAddress: _routerAddress,
+            routerType: _routerType,
+            enabled: true,
+            label: _label
+        }));
+
+        emit RouterAdded(routers.length - 1, _routerAddress, _routerType);
+    }
+
+    /// @notice Remove a router (owner only)
+    function removeRouter(uint256 index) external onlyOwner {
+        if (index >= routers.length) revert InvalidIndex();
+        
+        routers[index].enabled = false;
+
+        // If removing active router, set to first enabled router
+        if (index == activeRouterIndex) {
+            for (uint256 i = 0; i < routers.length; i++) {
+                if (routers[i].enabled) {
+                    activeRouterIndex = i;
+                    break;
+                }
+            }
+        }
+
+        emit RouterRemoved(index);
+    }
+
+    /// @notice Set active router (keeper or owner)
+    function setActiveRouter(uint256 index) external onlyKeeperOrOwner {
+        if (index >= routers.length) revert InvalidIndex();
+        if (!routers[index].enabled) revert InvalidIndex();
+        
+        activeRouterIndex = index;
+        emit ActiveRouterSet(index);
+    }
+
+    /// @notice Get router count
+    function routersLength() external view returns (uint256) {
+        return routers.length;
+    }
+
+    /// @notice Get router details
+    function getRouter(uint256 index) external view returns (
+        address routerAddress,
+        RouterType routerType,
+        bool enabled,
+        string memory label
+    ) {
+        if (index >= routers.length) revert InvalidIndex();
+        DexRouter storage router = routers[index];
+        return (
+            router.routerAddress,
+            router.routerType,
+            router.enabled,
+            router.label
+        );
     }
 
     // ─── Keeper Functions ────────────────────────────────────────────────
 
-    /// @notice Update protocol allocation splits (keeper or owner)
-    /// @notice Update protocol allocation splits (keeper or owner)
-    /// @dev Subject to splits cooldown to prevent rapid manipulation
+    /// @notice Update protocol allocation splits (owner only) - DEPRECATED
+    /// @dev Kept for backward compatibility, use updateYieldSourceSplit instead
     function setSplits(
         uint256 _splitYei,
         uint256 _splitTakara,
@@ -430,9 +749,12 @@ contract USDCStrategy is IStrategy, Ownable {
         if (lastSplitsTime > 0 && block.timestamp < lastSplitsTime + splitsCooldown) {
             revert SplitsCooldownActive(lastSplitsTime + splitsCooldown);
         }
-        splitYei = _splitYei;
-        splitTakara = _splitTakara;
-        splitMorpho = _splitMorpho;
+
+        // Update first 3 yield sources if they exist
+        if (yieldSources.length >= 1) yieldSources[0].split = _splitYei;
+        if (yieldSources.length >= 2) yieldSources[1].split = _splitTakara;
+        if (yieldSources.length >= 3) yieldSources[2].split = _splitMorpho;
+
         lastSplitsTime = block.timestamp;
         emit SplitUpdated(_splitYei, _splitTakara, _splitMorpho);
     }
@@ -448,30 +770,36 @@ contract USDCStrategy is IStrategy, Ownable {
         if (total == 0) return;
 
         // Withdraw everything
-        uint256 yei = _yeiBalance();
-        uint256 takara = _takaraBalance();
-        uint256 morphoBal = _morphoBalance();
+        for (uint256 i = 0; i < yieldSources.length; i++) {
+            YieldSource storage source = yieldSources[i];
+            if (!source.enabled) continue;
 
-        if (yei > 0) yeiPool.withdraw(address(usdc), yei, address(this));
-        if (takara > 0) {
-            uint256 err = cToken.redeemUnderlying(takara);
-            if (err != 0) revert RedeemFailed(err);
+            uint256 balance = _getSourceBalance(source);
+            if (balance == 0) continue;
+
+            if (source.protocolType == ProtocolType.Aave) {
+                IAavePool(source.protocolAddress).withdraw(address(usdc), balance, address(this));
+            } else if (source.protocolType == ProtocolType.Compound) {
+                uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(balance);
+                if (err != 0) revert RedeemFailed(err);
+            } else if (source.protocolType == ProtocolType.Morpho) {
+                IMorpho(source.protocolAddress).withdraw(
+                    address(usdc), 
+                    balance, 
+                    address(this), 
+                    source.morphoMaxIterations
+                );
+            }
         }
-        if (morphoBal > 0) morpho.withdraw(address(usdc), morphoBal, address(this), morphoMaxIterations);
 
         // Re-deploy with current splits
-        uint256 balance = usdc.balanceOf(address(this));
-        if (balance > 0) {
-            _deployToProtocols(balance);
+        uint256 usdcBalance = usdc.balanceOf(address(this));
+        if (usdcBalance > 0) {
+            _deployToProtocols(usdcBalance);
         }
 
         lastRebalanceTime = block.timestamp;
         emit Rebalanced();
-    }
-
-    /// @notice Switch active router type (keeper or owner)
-    function setActiveRouter(RouterType _type) external onlyKeeperOrOwner {
-        activeRouter = _type;
     }
 
     /// @notice Claim Morpho rewards via Merkl distributor and swap to USDC
@@ -487,10 +815,17 @@ contract USDCStrategy is IStrategy, Ownable {
 
         for (uint256 i = 0; i < tokens.length; i++) {
             if (tokens[i] == address(usdc)) continue;
+            
             uint256 bal = IERC20(tokens[i]).balanceOf(address(this));
-            if (bal > 0 && morphoSwapPath.length >= 2) {
-                uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
-                _swapDynamic(tokens[i], bal, morphoSwapPath, minOut);
+            if (bal == 0) continue;
+
+            // Try to find a yield source with matching reward token
+            for (uint256 j = 0; j < yieldSources.length; j++) {
+                if (yieldSources[j].rewardToken == tokens[i] && yieldSources[j].swapPath.length >= 2) {
+                    uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
+                    _swapDynamic(tokens[i], bal, yieldSources[j].swapPath, minOut);
+                    break;
+                }
             }
         }
 
@@ -546,39 +881,6 @@ contract USDCStrategy is IStrategy, Ownable {
         emit SplitsCooldownUpdated(old, _seconds);
     }
 
-    /// @notice Configure Takara reward token and swap path
-    function setTakaraRewardConfig(
-        address _rewardToken,
-        address[] calldata _swapPath
-    ) external onlyOwner {
-        takaraRewardToken = _rewardToken;
-        takaraSwapPath = _swapPath;
-    }
-
-    /// @notice Configure Morpho reward token and swap path
-    function setMorphoRewardConfig(
-        address _rewardToken,
-        address[] calldata _swapPath
-    ) external onlyOwner {
-        morphoRewardToken = _rewardToken;
-        morphoSwapPath = _swapPath;
-    }
-
-    /// @notice Update Morpho max iterations
-    function setMorphoMaxIterations(uint256 _maxIterations) external onlyOwner {
-        morphoMaxIterations = _maxIterations;
-    }
-
-    /// @notice Update V2 DEX router
-    function setRouterV2(address _router) external onlyOwner {
-        routerV2 = ISailorRouter(_router);
-    }
-
-    /// @notice Update V3 DEX router
-    function setRouterV3(address _router) external onlyOwner {
-        routerV3 = ISwapRouterV3(_router);
-    }
-
     /// @notice Set V3 pool fee tier
     function setV3PoolFee(uint24 _fee) external onlyOwner {
         v3PoolFee = _fee;
@@ -593,5 +895,168 @@ contract USDCStrategy is IStrategy, Ownable {
     function rescueToken(address _token, uint256 _amount) external onlyOwner {
         if (_token == address(usdc)) revert InvalidAddress();
         IERC20(_token).safeTransfer(owner(), _amount);
+    }
+
+    // ─── Legacy Getters (Backward Compatibility) ─────────────────────────
+
+    /// @notice Get Yei split (first yield source)
+    function splitYei() external view returns (uint256) {
+        return yieldSources.length > 0 ? yieldSources[0].split : 0;
+    }
+
+    /// @notice Get Takara split (second yield source)
+    function splitTakara() external view returns (uint256) {
+        return yieldSources.length > 1 ? yieldSources[1].split : 0;
+    }
+
+    /// @notice Get Morpho split (third yield source)
+    function splitMorpho() external view returns (uint256) {
+        return yieldSources.length > 2 ? yieldSources[2].split : 0;
+    }
+
+    /// @notice Get Morpho max iterations (third yield source)
+    function morphoMaxIterations() external view returns (uint256) {
+        return yieldSources.length > 2 ? yieldSources[2].morphoMaxIterations : 0;
+    }
+
+    /// @notice Get Yei pool address
+    function yeiPool() external view returns (address) {
+        return yieldSources.length > 0 ? yieldSources[0].protocolAddress : address(0);
+    }
+
+    /// @notice Get aToken address
+    function aToken() external view returns (address) {
+        return yieldSources.length > 0 ? yieldSources[0].receiptToken : address(0);
+    }
+
+    /// @notice Get cToken address
+    function cToken() external view returns (address) {
+        return yieldSources.length > 1 ? yieldSources[1].protocolAddress : address(0);
+    }
+
+    /// @notice Get comptroller address
+    function comptroller() external view returns (address) {
+        return yieldSources.length > 1 ? yieldSources[1].comptroller : address(0);
+    }
+
+    /// @notice Get Morpho address
+    function morpho() external view returns (address) {
+        return yieldSources.length > 2 ? yieldSources[2].protocolAddress : address(0);
+    }
+
+    /// @notice Get Takara reward token
+    function takaraRewardToken() external view returns (address) {
+        return yieldSources.length > 1 ? yieldSources[1].rewardToken : address(0);
+    }
+
+    /// @notice Get Morpho reward token
+    function morphoRewardToken() external view returns (address) {
+        return yieldSources.length > 2 ? yieldSources[2].rewardToken : address(0);
+    }
+
+    /// @notice Get router V2 address (backward compatibility)
+    function routerV2() external view returns (address) {
+        for (uint256 i = 0; i < routers.length; i++) {
+            if (routers[i].routerType == RouterType.V2 && routers[i].enabled) {
+                return routers[i].routerAddress;
+            }
+        }
+        return address(0);
+    }
+
+    /// @notice Get router V3 address (backward compatibility)
+    function routerV3() external view returns (address) {
+        for (uint256 i = 0; i < routers.length; i++) {
+            if (routers[i].routerType == RouterType.V3 && routers[i].enabled) {
+                return routers[i].routerAddress;
+            }
+        }
+        return address(0);
+    }
+
+    /// @notice Get active router type (backward compatibility)
+    function activeRouter() external view returns (RouterType) {
+        if (activeRouterIndex >= routers.length) return RouterType.V2;
+        return routers[activeRouterIndex].routerType;
+    }
+
+    /// @notice Set active router by type (backward compatibility)
+    function setActiveRouter(RouterType _type) external onlyKeeperOrOwner {
+        for (uint256 i = 0; i < routers.length; i++) {
+            if (routers[i].routerType == _type && routers[i].enabled) {
+                activeRouterIndex = i;
+                emit ActiveRouterSet(i);
+                return;
+            }
+        }
+    }
+
+    /// @notice Set router V2 address (backward compatibility)
+    function setRouterV2(address _router) external onlyOwner {
+        // Find first V2 router and update, or add new
+        for (uint256 i = 0; i < routers.length; i++) {
+            if (routers[i].routerType == RouterType.V2) {
+                routers[i].routerAddress = _router;
+                return;
+            }
+        }
+        // If no V2 router exists, add it
+        if (_router != address(0)) {
+            routers.push(DexRouter({
+                routerAddress: _router,
+                routerType: RouterType.V2,
+                enabled: true,
+                label: "V2 Router"
+            }));
+        }
+    }
+
+    /// @notice Set router V3 address (backward compatibility)
+    function setRouterV3(address _router) external onlyOwner {
+        // Find first V3 router and update, or add new
+        for (uint256 i = 0; i < routers.length; i++) {
+            if (routers[i].routerType == RouterType.V3) {
+                routers[i].routerAddress = _router;
+                return;
+            }
+        }
+        // If no V3 router exists, add it
+        if (_router != address(0)) {
+            routers.push(DexRouter({
+                routerAddress: _router,
+                routerType: RouterType.V3,
+                enabled: true,
+                label: "V3 Router"
+            }));
+        }
+    }
+
+    /// @notice Set Takara reward config (backward compatibility)
+    function setTakaraRewardConfig(
+        address _rewardToken,
+        address[] calldata _swapPath
+    ) external onlyOwner {
+        if (yieldSources.length > 1) {
+            yieldSources[1].rewardToken = _rewardToken;
+            yieldSources[1].swapPath = _swapPath;
+        }
+    }
+
+    /// @notice Set Morpho reward config (backward compatibility)
+    function setMorphoRewardConfig(
+        address _rewardToken,
+        address[] calldata _swapPath
+    ) external onlyOwner {
+        if (yieldSources.length > 2) {
+            yieldSources[2].rewardToken = _rewardToken;
+            yieldSources[2].swapPath = _swapPath;
+        }
+    }
+
+    /// @notice Set Morpho max iterations (backward compatibility)
+    function setMorphoMaxIterations(uint256 _maxIterations) external onlyOwner {
+        if (yieldSources.length > 2) {
+            yieldSources[2].morphoMaxIterations = _maxIterations;
+        }
     }
 }
