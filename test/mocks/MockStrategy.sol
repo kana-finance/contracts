@@ -36,6 +36,15 @@ contract MockStrategy is IStrategy {
         }
     }
 
+    /// @notice Harvest with slippage protection (for vault integration)
+    function harvest(uint256, uint256) external returns (uint256 profit) {
+        profit = pendingYield;
+        if (profit > 0) {
+            totalDeposited += profit;
+            pendingYield = 0;
+        }
+    }
+
     function balanceOf() external view override returns (uint256) {
         return want.balanceOf(address(this));
     }

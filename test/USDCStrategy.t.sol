@@ -91,7 +91,10 @@ contract USDCStrategyTest is Test {
             3334, // splitYei
             3333, // splitTakara
             3333, // splitMorpho
-            4     // morphoMaxIterations
+            4,    // morphoMaxIterations
+            500,  // maxSlippageBps (5%)
+            3600, // rebalanceCooldown (1 hour)
+            3600  // splitsCooldown (1 hour)
         );
         
         // Fund vault with USDC
@@ -127,7 +130,7 @@ contract USDCStrategyTest is Test {
         });
         
         vm.expectRevert(USDCStrategy.InvalidAddress.selector);
-        new USDCStrategy(addrs, 3334, 3333, 3333, 4);
+        new USDCStrategy(addrs, 3334, 3333, 3333, 4, 500, 3600, 3600);
     }
     
     function test_constructor_invalidSplit_reverts() public {
@@ -144,7 +147,7 @@ contract USDCStrategyTest is Test {
         });
         
         vm.expectRevert(USDCStrategy.InvalidSplit.selector);
-        new USDCStrategy(addrs, 5000, 5000, 5000, 4); // 150% total
+        new USDCStrategy(addrs, 5000, 5000, 5000, 4, 500, 3600, 3600); // 150% total
     }
     
     // ─── Deposit Tests ───────────────────────────────────────────────────
@@ -380,7 +383,8 @@ contract USDCStrategyTest is Test {
         // Change splits
         strategy.setSplits(8000, 1000, 1000);
         
-        // Rebalance
+        // Warp past cooldown and rebalance
+        vm.warp(block.timestamp + 3601);
         strategy.rebalance();
         
         // Balance should be preserved
@@ -395,6 +399,7 @@ contract USDCStrategyTest is Test {
         vm.prank(vault);
         strategy.deposit(amount);
         
+        vm.warp(block.timestamp + 3601);
         vm.expectEmit(true, true, true, true);
         emit USDCStrategy.Rebalanced();
         
@@ -409,6 +414,7 @@ contract USDCStrategyTest is Test {
     
     function test_rebalance_emptyStrategy() public {
         // Should not revert on empty strategy
+        vm.warp(block.timestamp + 3601);
         strategy.rebalance();
     }
     
@@ -675,6 +681,7 @@ contract USDCStrategyTest is Test {
         strategy.deposit(amount);
         
         // Rebalance to new splits
+        vm.warp(block.timestamp + 3601);
         strategy.rebalance();
         
         // Now withdraw - should pull mostly from Yei
@@ -693,6 +700,9 @@ contract USDCStrategyTest is Test {
         usdc.transfer(address(strategy), amount);
         vm.prank(vault);
         strategy.deposit(amount);
+        
+        // Warp past splits cooldown
+        vm.warp(block.timestamp + 3601);
         
         // Now change to even splits and try to withdraw
         // The proportional calc will try to pull from Takara/Morpho which have 0
@@ -756,6 +766,6 @@ contract USDCStrategyTest is Test {
         });
         
         vm.expectRevert(USDCStrategy.InvalidAddress.selector);
-        new USDCStrategy(addrs, 3334, 3333, 3333, 4);
+        new USDCStrategy(addrs, 3334, 3333, 3333, 4, 500, 3600, 3600);
     }
 }

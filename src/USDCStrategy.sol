@@ -17,9 +17,9 @@ import {ISwapRouterV3} from "./interfaces/external/ISwapRouterV3.sol";
 /// @title USDCStrategy
 /// @notice Single strategy that manages USDC across multiple SEI lending
 ///         protocols: Yei (Aave V3 fork), Takara (Compound fork), and Morpho.
-///         Allocation splits are configurable by the owner (keeper/vault).
-/// @dev Follows the one-strategy-per-asset pattern. The strategy handles all
-///      protocol interactions internally. Only the vault can deposit/withdraw.
+///         Allocation splits are configurable. Keeper can trigger operations;
+///         owner (multisig) retains full admin control.
+/// @dev Includes on-chain max slippage cap and rebalance cooldown for safety.
 contract USDCStrategy is IStrategy, Ownable {
     using SafeERC20 for IERC20;
 
@@ -31,21 +31,15 @@ contract USDCStrategy is IStrategy, Ownable {
     /// @notice USDC token
     IERC20 public immutable usdc;
 
+    /// @notice Keeper address — can trigger harvest, rebalance, claims
+    address public keeper;
+
     // ─── Protocol References ─────────────────────────────────────────────
 
-    /// @notice Yei (Aave V3 fork) lending pool
     IAavePool public immutable yeiPool;
-
-    /// @notice Yei aUSDC token
     IAToken public immutable aToken;
-
-    /// @notice Takara cUSDC token (Compound fork)
     ICErc20 public immutable cToken;
-
-    /// @notice Takara Comptroller
     IComptroller public immutable comptroller;
-
-    /// @notice Morpho protocol
     IMorpho public immutable morpho;
 
     /// @notice Router type enum
@@ -68,13 +62,8 @@ contract USDCStrategy is IStrategy, Ownable {
 
     // ─── Allocation ──────────────────────────────────────────────────────
 
-    /// @notice Allocation to Yei in basis points
     uint256 public splitYei;
-
-    /// @notice Allocation to Takara in basis points
     uint256 public splitTakara;
-
-    /// @notice Allocation to Morpho in basis points
     uint256 public splitMorpho;
 
     uint256 public constant SPLIT_TOTAL = 10000; // 100%
@@ -82,18 +71,34 @@ contract USDCStrategy is IStrategy, Ownable {
     /// @notice Morpho P2P matching iterations
     uint256 public morphoMaxIterations;
 
+    // ─── Safety: Slippage Cap ────────────────────────────────────────────
+
+    /// @notice Maximum allowed slippage in basis points (e.g., 500 = 5%)
+    /// @dev Enforced on-chain — keeper can never accept worse than this
+    uint256 public maxSlippageBps;
+
+    /// @notice Absolute max that maxSlippageBps can be set to
+    uint256 public constant MAX_SLIPPAGE_CEILING = 1000; // 10%
+
+    // ─── Safety: Rebalance Cooldown ──────────────────────────────────────
+
+    /// @notice Minimum seconds between rebalances
+    uint256 public rebalanceCooldown;
+
+    /// @notice Timestamp of last rebalance
+    uint256 public lastRebalanceTime;
+
+    /// @notice Minimum seconds between split changes
+    uint256 public splitsCooldown;
+
+    /// @notice Timestamp of last splits change
+    uint256 public lastSplitsTime;
+
     // ─── Reward Config ───────────────────────────────────────────────────
 
-    /// @notice Takara reward token (if any)
     address public takaraRewardToken;
-
-    /// @notice Swap path: Takara reward → USDC
     address[] public takaraSwapPath;
-
-    /// @notice Morpho reward token (if any)
     address public morphoRewardToken;
-
-    /// @notice Swap path: Morpho reward → USDC
     address[] public morphoSwapPath;
 
     // ─── Events ──────────────────────────────────────────────────────────
@@ -104,6 +109,10 @@ contract USDCStrategy is IStrategy, Ownable {
     event SplitUpdated(uint256 yei, uint256 takara, uint256 morpho);
     event Rebalanced();
     event VaultUpdated(address indexed oldVault, address indexed newVault);
+    event KeeperUpdated(address indexed oldKeeper, address indexed newKeeper);
+    event MaxSlippageUpdated(uint256 oldBps, uint256 newBps);
+    event RebalanceCooldownUpdated(uint256 oldCooldown, uint256 newCooldown);
+    event SplitsCooldownUpdated(uint256 oldCooldown, uint256 newCooldown);
 
     // ─── Errors ──────────────────────────────────────────────────────────
 
@@ -112,11 +121,21 @@ contract USDCStrategy is IStrategy, Ownable {
     error InvalidSplit();
     error MintFailed(uint256 errorCode);
     error RedeemFailed(uint256 errorCode);
+    error NotKeeperOrOwner();
+    error SlippageExceedsCap(uint256 minAmountOut, uint256 minRequired);
+    error RebalanceCooldownActive(uint256 nextAllowed);
+    error SplitsCooldownActive(uint256 nextAllowed);
+    error SlippageTooHigh();
 
     // ─── Modifiers ───────────────────────────────────────────────────────
 
     modifier onlyVault() {
         if (msg.sender != vault) revert OnlyVault();
+        _;
+    }
+
+    modifier onlyKeeperOrOwner() {
+        if (msg.sender != keeper && msg.sender != owner()) revert NotKeeperOrOwner();
         _;
     }
 
@@ -134,20 +153,19 @@ contract USDCStrategy is IStrategy, Ownable {
         address routerV3;
     }
 
-    /// @param addrs Protocol addresses
-    /// @param _splitYei Initial Yei allocation (bps)
-    /// @param _splitTakara Initial Takara allocation (bps)
-    /// @param _splitMorpho Initial Morpho allocation (bps)
-    /// @param _morphoMaxIterations Morpho P2P matching iterations
     constructor(
         ProtocolAddresses memory addrs,
         uint256 _splitYei,
         uint256 _splitTakara,
         uint256 _splitMorpho,
-        uint256 _morphoMaxIterations
+        uint256 _morphoMaxIterations,
+        uint256 _maxSlippageBps,
+        uint256 _rebalanceCooldown,
+        uint256 _splitsCooldown
     ) Ownable(msg.sender) {
         if (addrs.usdc == address(0) || addrs.vault == address(0)) revert InvalidAddress();
         if (_splitYei + _splitTakara + _splitMorpho != SPLIT_TOTAL) revert InvalidSplit();
+        if (_maxSlippageBps > MAX_SLIPPAGE_CEILING) revert SlippageTooHigh();
 
         usdc = IERC20(addrs.usdc);
         vault = addrs.vault;
@@ -164,8 +182,11 @@ contract USDCStrategy is IStrategy, Ownable {
         splitTakara = _splitTakara;
         splitMorpho = _splitMorpho;
         morphoMaxIterations = _morphoMaxIterations;
+        maxSlippageBps = _maxSlippageBps;
+        rebalanceCooldown = _rebalanceCooldown;
+        splitsCooldown = _splitsCooldown;
 
-        // Pre-approve protocols to spend USDC
+        // Pre-approve protocols
         IERC20(addrs.usdc).safeIncreaseAllowance(addrs.yeiPool, type(uint256).max);
         IERC20(addrs.usdc).safeIncreaseAllowance(addrs.cToken, type(uint256).max);
         IERC20(addrs.usdc).safeIncreaseAllowance(addrs.morpho, type(uint256).max);
@@ -187,7 +208,7 @@ contract USDCStrategy is IStrategy, Ownable {
     }
 
     /// @inheritdoc IStrategy
-    /// @dev Kept for interface compatibility — calls harvestWithSlippage with 0 minAmounts
+    /// @dev Interface compatibility — calls harvest with 0 minAmounts (no slippage protection)
     function harvest() external override onlyVault returns (uint256 profit) {
         profit = _harvestAll(0, 0);
         emit Harvested(profit);
@@ -196,7 +217,7 @@ contract USDCStrategy is IStrategy, Ownable {
     /// @notice Harvest with slippage protection
     /// @param takaraMinOut Minimum USDC expected from Takara reward swap
     /// @param morphoMinOut Minimum USDC expected from Morpho reward swap
-    function harvestWithSlippage(
+    function harvest(
         uint256 takaraMinOut,
         uint256 morphoMinOut
     ) external onlyVault returns (uint256 profit) {
@@ -216,21 +237,18 @@ contract USDCStrategy is IStrategy, Ownable {
 
     // ─── Internal: Deploy ────────────────────────────────────────────────
 
-    /// @dev Split deposit across protocols according to allocation
     function _deployToProtocols(uint256 amount) internal {
         uint256 toYei = (amount * splitYei) / SPLIT_TOTAL;
         uint256 toTakara = (amount * splitTakara) / SPLIT_TOTAL;
-        uint256 toMorpho = amount - toYei - toTakara; // Remainder to Morpho (avoids dust)
+        uint256 toMorpho = amount - toYei - toTakara;
 
         if (toYei > 0) {
             yeiPool.supply(address(usdc), toYei, address(this), 0);
         }
-
         if (toTakara > 0) {
             uint256 err = cToken.mint(toTakara);
             if (err != 0) revert MintFailed(err);
         }
-
         if (toMorpho > 0) {
             morpho.supply(address(usdc), toMorpho, address(this), morphoMaxIterations);
         }
@@ -238,15 +256,12 @@ contract USDCStrategy is IStrategy, Ownable {
 
     // ─── Internal: Withdraw ──────────────────────────────────────────────
 
-    /// @dev Withdraw proportionally from each protocol
     function _withdrawFromProtocols(uint256 amount) internal {
         uint256 total = _totalBalance();
         if (total == 0) return;
 
-        // Withdraw proportionally based on each protocol's current share
         uint256 yeiBalance = _yeiBalance();
         uint256 takaraBalance = _takaraBalance();
-        uint256 morphoBalance = _morphoBalance();
 
         uint256 fromYei = (amount * yeiBalance) / total;
         uint256 fromTakara = (amount * takaraBalance) / total;
@@ -256,13 +271,12 @@ contract USDCStrategy is IStrategy, Ownable {
             uint256 actual = fromYei > yeiBalance ? yeiBalance : fromYei;
             yeiPool.withdraw(address(usdc), actual, address(this));
         }
-
         if (fromTakara > 0 && takaraBalance > 0) {
             uint256 actual = fromTakara > takaraBalance ? takaraBalance : fromTakara;
             uint256 err = cToken.redeemUnderlying(actual);
             if (err != 0) revert RedeemFailed(err);
         }
-
+        uint256 morphoBalance = _morphoBalance();
         if (fromMorpho > 0 && morphoBalance > 0) {
             uint256 actual = fromMorpho > morphoBalance ? morphoBalance : fromMorpho;
             morpho.withdraw(address(usdc), actual, address(this), morphoMaxIterations);
@@ -271,29 +285,28 @@ contract USDCStrategy is IStrategy, Ownable {
 
     // ─── Internal: Harvest ───────────────────────────────────────────────
 
-    /// @dev Harvest rewards from all protocols, swap to USDC, re-deploy
-    /// @param takaraMinOut Minimum USDC from Takara reward swap (0 = no protection)
-    /// @param morphoMinOut Minimum USDC from Morpho reward swap (0 = no protection)
     function _harvestAll(uint256 takaraMinOut, uint256 morphoMinOut) internal returns (uint256 profit) {
         uint256 balanceBefore = usdc.balanceOf(address(this));
 
-        // 1. Yei: interest accrues automatically in aToken balance (no claim needed)
+        // 1. Yei: interest accrues automatically in aToken balance
 
         // 2. Takara: claim COMP-style rewards
         if (takaraRewardToken != address(0)) {
             comptroller.claimComp(address(this));
             uint256 rewardBal = IERC20(takaraRewardToken).balanceOf(address(this));
             if (rewardBal > 0 && takaraSwapPath.length >= 2) {
+                // Enforce on-chain slippage cap against reward amount
+                if (takaraMinOut > 0) _validateSlippage(rewardBal, takaraMinOut);
                 _swap(takaraRewardToken, rewardBal, takaraSwapPath, takaraMinOut);
             }
         }
 
-        // 3. Morpho: rewards are claimed separately via claimMorphoRewards()
-        //    (requires off-chain merkle proof from Merkl API)
-        //    Any morpho reward tokens already in the contract get swapped here
+        // 3. Morpho: swap any reward tokens already claimed via claimMorphoRewards()
         if (morphoRewardToken != address(0)) {
             uint256 rewardBal = IERC20(morphoRewardToken).balanceOf(address(this));
             if (rewardBal > 0 && morphoSwapPath.length >= 2) {
+                // Enforce on-chain slippage cap against reward amount
+                if (morphoMinOut > 0) _validateSlippage(rewardBal, morphoMinOut);
                 _swap(morphoRewardToken, rewardBal, morphoSwapPath, morphoMinOut);
             }
         }
@@ -307,6 +320,18 @@ contract USDCStrategy is IStrategy, Ownable {
         }
     }
 
+    /// @dev Validate that minAmountOut implies slippage within the on-chain cap.
+    ///      For reward→USDC swaps, we assume 1:1 as the "expected" rate (stablecoin baseline).
+    ///      minAmountOut must be >= rewardAmount * (10000 - maxSlippageBps) / 10000.
+    ///      This prevents a compromised keeper from setting minAmountOut = 0.
+    function _validateSlippage(uint256 rewardAmount, uint256 minAmountOut) internal view {
+        if (maxSlippageBps == 0) revert SlippageTooHigh();
+        uint256 minRequired = (rewardAmount * (10000 - maxSlippageBps)) / 10000;
+        if (minAmountOut < minRequired) {
+            revert SlippageExceedsCap(minAmountOut, minRequired);
+        }
+    }
+
     // ─── Internal: Swap ──────────────────────────────────────────────────
 
     function _swap(
@@ -316,7 +341,6 @@ contract USDCStrategy is IStrategy, Ownable {
         uint256 minAmountOut
     ) internal {
         if (amountIn == 0 || path.length < 2) return;
-        // Copy storage to memory for unified _executeSwap
         address[] memory memPath = new address[](path.length);
         for (uint256 i = 0; i < path.length; i++) {
             memPath[i] = path[i];
@@ -324,7 +348,6 @@ contract USDCStrategy is IStrategy, Ownable {
         _executeSwap(tokenIn, memPath[memPath.length - 1], amountIn, minAmountOut, memPath);
     }
 
-    /// @dev Swap tokens via router using a dynamic path (for Merkl claims)
     function _swapDynamic(
         address tokenIn,
         uint256 amountIn,
@@ -332,18 +355,14 @@ contract USDCStrategy is IStrategy, Ownable {
         uint256 minAmountOut
     ) internal {
         if (amountIn == 0 || path.length < 2) return;
-
-        // Build path: tokenIn → intermediaries → USDC
         address[] memory swapPath = new address[](path.length);
         swapPath[0] = tokenIn;
         for (uint256 i = 1; i < path.length; i++) {
             swapPath[i] = path[i];
         }
-
         _executeSwap(tokenIn, swapPath[swapPath.length - 1], amountIn, minAmountOut, swapPath);
     }
 
-    /// @dev Execute swap on active router (V2 or V3)
     function _executeSwap(
         address tokenIn,
         address tokenOut,
@@ -355,11 +374,7 @@ contract USDCStrategy is IStrategy, Ownable {
             if (address(routerV2) == address(0)) return;
             IERC20(tokenIn).safeIncreaseAllowance(address(routerV2), amountIn);
             routerV2.swapExactTokensForTokens(
-                amountIn,
-                minAmountOut,
-                path,
-                address(this),
-                block.timestamp
+                amountIn, minAmountOut, path, address(this), block.timestamp
             );
         } else {
             if (address(routerV3) == address(0)) return;
@@ -401,28 +416,34 @@ contract USDCStrategy is IStrategy, Ownable {
             + usdc.balanceOf(address(this));
     }
 
-    // ─── Admin: Allocation ───────────────────────────────────────────────
+    // ─── Keeper Functions ────────────────────────────────────────────────
 
-    /// @notice Update protocol allocation splits
-    /// @param _splitYei Yei allocation in bps
-    /// @param _splitTakara Takara allocation in bps
-    /// @param _splitMorpho Morpho allocation in bps
+    /// @notice Update protocol allocation splits (keeper or owner)
+    /// @notice Update protocol allocation splits (keeper or owner)
+    /// @dev Subject to splits cooldown to prevent rapid manipulation
     function setSplits(
         uint256 _splitYei,
         uint256 _splitTakara,
         uint256 _splitMorpho
-    ) external onlyOwner {
+    ) external onlyKeeperOrOwner {
         if (_splitYei + _splitTakara + _splitMorpho != SPLIT_TOTAL) revert InvalidSplit();
-
+        if (lastSplitsTime > 0 && block.timestamp < lastSplitsTime + splitsCooldown) {
+            revert SplitsCooldownActive(lastSplitsTime + splitsCooldown);
+        }
         splitYei = _splitYei;
         splitTakara = _splitTakara;
         splitMorpho = _splitMorpho;
-
+        lastSplitsTime = block.timestamp;
         emit SplitUpdated(_splitYei, _splitTakara, _splitMorpho);
     }
 
     /// @notice Rebalance: withdraw all, re-deploy with current splits
-    function rebalance() external onlyOwner {
+    /// @dev Subject to rebalance cooldown
+    function rebalance() external onlyKeeperOrOwner {
+        if (lastRebalanceTime > 0 && block.timestamp < lastRebalanceTime + rebalanceCooldown) {
+            revert RebalanceCooldownActive(lastRebalanceTime + rebalanceCooldown);
+        }
+
         uint256 total = _totalBalance();
         if (total == 0) return;
 
@@ -444,10 +465,56 @@ contract USDCStrategy is IStrategy, Ownable {
             _deployToProtocols(balance);
         }
 
+        lastRebalanceTime = block.timestamp;
         emit Rebalanced();
     }
 
-    // ─── Admin: Config ───────────────────────────────────────────────────
+    /// @notice Switch active router type (keeper or owner)
+    function setActiveRouter(RouterType _type) external onlyKeeperOrOwner {
+        activeRouter = _type;
+    }
+
+    /// @notice Claim Morpho rewards via Merkl distributor and swap to USDC
+    function claimMorphoRewards(
+        address[] calldata tokens,
+        uint256[] calldata amounts,
+        bytes32[][] calldata proofs,
+        uint256[] calldata minAmountsOut
+    ) external onlyKeeperOrOwner {
+        if (address(merklDistributor) == address(0)) return;
+
+        merklDistributor.claim(address(this), tokens, amounts, proofs);
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (tokens[i] == address(usdc)) continue;
+            uint256 bal = IERC20(tokens[i]).balanceOf(address(this));
+            if (bal > 0 && morphoSwapPath.length >= 2) {
+                uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
+                _swapDynamic(tokens[i], bal, morphoSwapPath, minOut);
+            }
+        }
+
+        uint256 looseUsdc = usdc.balanceOf(address(this));
+        if (looseUsdc > 0) {
+            _deployToProtocols(looseUsdc);
+        }
+    }
+
+    // ─── Owner-Only Admin ────────────────────────────────────────────────
+
+    /// @notice Set keeper address
+    function setKeeper(address _keeper) external onlyOwner {
+        address old = keeper;
+        keeper = _keeper;
+        emit KeeperUpdated(old, _keeper);
+    }
+
+    /// @notice Revoke keeper access
+    function revokeKeeper() external onlyOwner {
+        address old = keeper;
+        keeper = address(0);
+        emit KeeperUpdated(old, address(0));
+    }
 
     /// @notice Update the vault address
     function setVault(address _vault) external onlyOwner {
@@ -455,6 +522,28 @@ contract USDCStrategy is IStrategy, Ownable {
         address old = vault;
         vault = _vault;
         emit VaultUpdated(old, _vault);
+    }
+
+    /// @notice Set max slippage cap (basis points)
+    function setMaxSlippage(uint256 _bps) external onlyOwner {
+        if (_bps > MAX_SLIPPAGE_CEILING) revert SlippageTooHigh();
+        uint256 old = maxSlippageBps;
+        maxSlippageBps = _bps;
+        emit MaxSlippageUpdated(old, _bps);
+    }
+
+    /// @notice Set rebalance cooldown (seconds)
+    function setRebalanceCooldown(uint256 _seconds) external onlyOwner {
+        uint256 old = rebalanceCooldown;
+        rebalanceCooldown = _seconds;
+        emit RebalanceCooldownUpdated(old, _seconds);
+    }
+
+    /// @notice Set splits change cooldown (seconds)
+    function setSplitsCooldown(uint256 _seconds) external onlyOwner {
+        uint256 old = splitsCooldown;
+        splitsCooldown = _seconds;
+        emit SplitsCooldownUpdated(old, _seconds);
     }
 
     /// @notice Configure Takara reward token and swap path
@@ -480,19 +569,14 @@ contract USDCStrategy is IStrategy, Ownable {
         morphoMaxIterations = _maxIterations;
     }
 
-    /// @notice Update V2 DEX router (DragonSwap)
+    /// @notice Update V2 DEX router
     function setRouterV2(address _router) external onlyOwner {
         routerV2 = ISailorRouter(_router);
     }
 
-    /// @notice Update V3 DEX router (Sailor Finance)
+    /// @notice Update V3 DEX router
     function setRouterV3(address _router) external onlyOwner {
         routerV3 = ISwapRouterV3(_router);
-    }
-
-    /// @notice Switch active router type
-    function setActiveRouter(RouterType _type) external onlyOwner {
-        activeRouter = _type;
     }
 
     /// @notice Set V3 pool fee tier
@@ -504,43 +588,6 @@ contract USDCStrategy is IStrategy, Ownable {
     function setMerklDistributor(address _distributor) external onlyOwner {
         merklDistributor = IMerklDistributor(_distributor);
     }
-
-    /// @notice Claim Morpho rewards via Merkl distributor and swap to USDC
-    /// @dev Called by keeper with merkle proof data fetched from Merkl API
-    /// @param tokens Reward token addresses to claim
-    /// @param amounts Cumulative claimable amounts per token
-    /// @param proofs Merkle proofs per token
-    /// @param minAmountsOut Minimum USDC expected per token swap (same length as tokens)
-    function claimMorphoRewards(
-        address[] calldata tokens,
-        uint256[] calldata amounts,
-        bytes32[][] calldata proofs,
-        uint256[] calldata minAmountsOut
-    ) external onlyOwner {
-        if (address(merklDistributor) == address(0)) return;
-
-        // Claim from Merkl distributor
-        merklDistributor.claim(address(this), tokens, amounts, proofs);
-
-        // Swap each claimed token to USDC (skip if token is already USDC)
-        for (uint256 i = 0; i < tokens.length; i++) {
-            if (tokens[i] == address(usdc)) continue;
-
-            uint256 bal = IERC20(tokens[i]).balanceOf(address(this));
-            if (bal > 0 && morphoSwapPath.length >= 2) {
-                uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
-                _swapDynamic(tokens[i], bal, morphoSwapPath, minOut);
-            }
-        }
-
-        // Re-deploy any loose USDC
-        uint256 looseUsdc = usdc.balanceOf(address(this));
-        if (looseUsdc > 0) {
-            _deployToProtocols(looseUsdc);
-        }
-    }
-
-    // ─── Emergency ───────────────────────────────────────────────────────
 
     /// @notice Rescue stuck tokens (not USDC)
     function rescueToken(address _token, uint256 _amount) external onlyOwner {

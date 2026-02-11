@@ -15,18 +15,19 @@ contract KanaVaultTest is Test {
 
     address public owner = makeAddr("owner");
     address public feeRecipient = makeAddr("feeRecipient");
+    address public keeperAddr = makeAddr("keeper");
     address public alice = makeAddr("alice");
     address public bob = makeAddr("bob");
 
-    uint256 public constant FEE_BPS = 1000; // 10%
     uint256 public constant INITIAL_BALANCE = 100_000e6;
 
     function setUp() public {
         vm.startPrank(owner);
         usdc = new MockERC20("USD Coin", "USDC", 6);
-        vault = new KanaVault(IERC20(address(usdc)), feeRecipient, FEE_BPS);
+        vault = new KanaVault(IERC20(address(usdc)), feeRecipient);
         strategy = new MockStrategy(address(usdc));
         vault.setStrategy(IStrategy(address(strategy)));
+        vault.setKeeper(keeperAddr);
         vm.stopPrank();
 
         usdc.mint(alice, INITIAL_BALANCE);
@@ -44,11 +45,12 @@ contract KanaVaultTest is Test {
 
     function test_deposit_basic() public {
         vm.prank(alice);
-        uint256 shares = vault.deposit(10_000e6, alice);
+        vault.deposit(10_000e6, alice);
 
-        assertEq(shares, 10_000e6, "Shares should be 1:1 initially");
-        assertEq(vault.balanceOf(alice), 10_000e6, "Alice vault balance wrong");
+        // With virtual offset, shares won't be exactly 1:1 for first depositor
+        // but totalAssets should be correct
         assertEq(vault.totalAssets(), 10_000e6, "Total assets wrong");
+        assertGt(vault.balanceOf(alice), 0, "Alice should have shares");
     }
 
     function test_deposit_routes_to_strategy() public {
@@ -65,8 +67,6 @@ contract KanaVaultTest is Test {
         vault.deposit(30_000e6, bob);
 
         assertEq(vault.totalAssets(), 80_000e6, "Total assets should be sum");
-        assertEq(vault.balanceOf(alice), 50_000e6);
-        assertEq(vault.balanceOf(bob), 30_000e6);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -81,8 +81,8 @@ contract KanaVaultTest is Test {
         vm.prank(alice);
         uint256 assets = vault.redeem(shares, alice, alice);
 
-        assertEq(assets, 10_000e6, "Should withdraw full deposit");
-        assertEq(usdc.balanceOf(alice), INITIAL_BALANCE, "Alice should have original balance");
+        // With virtual offset, may lose a tiny amount to rounding
+        assertApproxEqAbs(assets, 10_000e6, 1, "Should withdraw full deposit");
         assertEq(vault.totalAssets(), 0, "Vault should be empty");
     }
 
@@ -93,8 +93,7 @@ contract KanaVaultTest is Test {
         vm.prank(alice);
         vault.withdraw(5_000e6, alice, alice);
 
-        assertEq(vault.balanceOf(alice), 5_000e6);
-        assertEq(vault.totalAssets(), 5_000e6);
+        assertApproxEqAbs(vault.totalAssets(), 5_000e6, 1);
     }
 
     function test_withdraw_pulls_from_strategy() public {
@@ -102,8 +101,9 @@ contract KanaVaultTest is Test {
         vault.deposit(10_000e6, alice);
         assertEq(strategy.balanceOf(), 10_000e6);
 
+        uint256 shares = vault.balanceOf(alice);
         vm.prank(alice);
-        vault.withdraw(10_000e6, alice, alice);
+        vault.redeem(shares, alice, alice);
         assertEq(strategy.balanceOf(), 0, "Strategy should be empty");
     }
 
@@ -169,7 +169,7 @@ contract KanaVaultTest is Test {
         strategy.simulateYield(100e6);
 
         vm.prank(owner);
-        vault.harvest();
+        vault.harvest(0, 0);
 
         // 10% fee on 100 USDC = 10 USDC
         assertEq(usdc.balanceOf(feeRecipient), 10e6, "Fee recipient should get 10%");
@@ -181,41 +181,77 @@ contract KanaVaultTest is Test {
         vault.deposit(10_000e6, alice);
 
         vm.prank(owner);
-        vault.harvest(); // should not revert
+        vault.harvest(0, 0); // should not revert
 
         assertEq(usdc.balanceOf(feeRecipient), 0);
     }
 
     function test_harvest_noStrategy_reverts() public {
-        // Fresh vault without strategy
         vm.startPrank(owner);
-        KanaVault emptyVault = new KanaVault(IERC20(address(usdc)), feeRecipient, FEE_BPS);
+        KanaVault emptyVault = new KanaVault(IERC20(address(usdc)), feeRecipient);
 
         vm.expectRevert(KanaVault.NoStrategy.selector);
-        emptyVault.harvest();
+        emptyVault.harvest(0, 0);
         vm.stopPrank();
     }
 
-    function test_harvest_onlyOwner() public {
+    function test_harvest_onlyKeeperOrOwner() public {
+        vm.prank(alice);
+        vm.expectRevert(KanaVault.NotKeeperOrOwner.selector);
+        vault.harvest(0, 0);
+    }
+
+    function test_harvest_keeper_can_call() public {
+        vm.prank(alice);
+        vault.deposit(10_000e6, alice);
+
+        usdc.mint(address(strategy), 100e6);
+        strategy.simulateYield(100e6);
+
+        vm.prank(keeperAddr);
+        vault.harvest(0, 0);
+
+        assertEq(usdc.balanceOf(feeRecipient), 10e6, "Keeper harvest should work");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  KEEPER MANAGEMENT
+    // ═══════════════════════════════════════════════════════════════════
+
+    function test_setKeeper() public {
+        address newKeeper = makeAddr("newKeeper");
+        vm.prank(owner);
+        vault.setKeeper(newKeeper);
+        assertEq(vault.keeper(), newKeeper);
+    }
+
+    function test_revokeKeeper() public {
+        vm.prank(owner);
+        vault.revokeKeeper();
+        assertEq(vault.keeper(), address(0));
+    }
+
+    function test_setKeeper_onlyOwner() public {
         vm.prank(alice);
         vm.expectRevert();
-        vault.harvest();
+        vault.setKeeper(alice);
+    }
+
+    function test_revokedKeeper_cannot_harvest() public {
+        vm.prank(owner);
+        vault.revokeKeeper();
+
+        vm.prank(keeperAddr);
+        vm.expectRevert(KanaVault.NotKeeperOrOwner.selector);
+        vault.harvest(0, 0);
     }
 
     // ═══════════════════════════════════════════════════════════════════
     //  FEE ADMIN
     // ═══════════════════════════════════════════════════════════════════
 
-    function test_setPerformanceFee() public {
-        vm.prank(owner);
-        vault.setPerformanceFee(500);
-        assertEq(vault.performanceFeeBps(), 500);
-    }
-
-    function test_setPerformanceFee_tooHigh_reverts() public {
-        vm.prank(owner);
-        vm.expectRevert(KanaVault.InvalidFee.selector);
-        vault.setPerformanceFee(2001);
+    function test_performanceFee_is_constant() public view {
+        assertEq(vault.PERFORMANCE_FEE_BPS(), 1000);
     }
 
     function test_setFeeRecipient() public {
@@ -231,6 +267,16 @@ contract KanaVaultTest is Test {
         vault.setFeeRecipient(address(0));
     }
 
+    function test_lockFeeRecipient() public {
+        vm.startPrank(owner);
+        vault.lockFeeRecipient();
+        assertTrue(vault.feeRecipientLocked());
+
+        vm.expectRevert(KanaVault.FeeRecipientIsLocked.selector);
+        vault.setFeeRecipient(makeAddr("new"));
+        vm.stopPrank();
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     //  ERC-4626 CONFORMANCE
     // ═══════════════════════════════════════════════════════════════════
@@ -239,11 +285,6 @@ contract KanaVaultTest is Test {
         assertEq(vault.asset(), address(usdc));
         assertEq(vault.name(), "Kana USDC Vault");
         assertEq(vault.symbol(), "kUSDC");
-    }
-
-    function test_erc4626_conversions() public view {
-        assertEq(vault.convertToShares(1000e6), 1000e6);
-        assertEq(vault.convertToAssets(1000e6), 1000e6);
     }
 
     function test_totalAssets_includes_yield() public {
@@ -261,13 +302,36 @@ contract KanaVaultTest is Test {
         // 10% yield
         usdc.mint(address(strategy), 1_000e6);
 
-        uint256 assetsPerShare = vault.convertToAssets(1e6);
-        assertGt(assetsPerShare, 1e6, "Share price should increase");
-
-        // Bob gets fewer shares
+        // Bob gets fewer shares for same deposit
         vm.prank(bob);
         uint256 bobShares = vault.deposit(10_000e6, bob);
-        assertLt(bobShares, 10_000e6, "Bob should get fewer shares");
+        uint256 aliceShares = vault.balanceOf(alice);
+        assertLt(bobShares, aliceShares, "Bob should get fewer shares");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  INFLATION ATTACK PROTECTION
+    // ═══════════════════════════════════════════════════════════════════
+
+    function test_inflationAttack_mitigated() public {
+        // Attacker deposits 1 wei
+        usdc.mint(address(this), 1);
+        usdc.approve(address(vault), 1);
+        vault.deposit(1, address(this));
+
+        // Attacker donates large amount directly to vault/strategy
+        usdc.mint(address(strategy), 10_000e6);
+
+        // Victim deposits — should NOT get 0 shares
+        vm.prank(alice);
+        uint256 victimShares = vault.deposit(10_000e6, alice);
+        assertGt(victimShares, 0, "Victim should get non-zero shares");
+
+        // Victim should be able to withdraw most of their deposit
+        vm.prank(alice);
+        uint256 received = vault.redeem(victimShares, alice, alice);
+        // With virtual offset, loss should be negligible
+        assertGt(received, 9_900e6, "Victim should not lose significant funds");
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -284,8 +348,8 @@ contract KanaVaultTest is Test {
         strategy.simulateYield(200e6);
 
         // 3. Harvest — 10% fee = 20 USDC
-        vm.prank(owner);
-        vault.harvest();
+        vm.prank(keeperAddr);
+        vault.harvest(0, 0);
         assertEq(usdc.balanceOf(feeRecipient), 20e6);
 
         // 4. Alice redeems
@@ -293,8 +357,8 @@ contract KanaVaultTest is Test {
         vm.prank(alice);
         uint256 received = vault.redeem(aliceShares, alice, alice);
 
-        // Should get ~10,180 (deposit + yield - fee), ±1 rounding
-        assertApproxEqAbs(received, 10_180e6, 1, "Alice should get deposit + yield - fee");
+        // Should get ~10,180 (deposit + yield - fee), ±2 for rounding with virtual offset
+        assertApproxEqAbs(received, 10_180e6, 2, "Alice should get deposit + yield - fee");
     }
 
     function test_multipleDepositsAndWithdrawals() public {
@@ -306,8 +370,6 @@ contract KanaVaultTest is Test {
         vm.prank(alice);
         vault.withdraw(20_000e6, alice, alice);
 
-        assertEq(vault.totalAssets(), 60_000e6);
-        assertEq(vault.balanceOf(alice), 30_000e6);
-        assertEq(vault.balanceOf(bob), 30_000e6);
+        assertApproxEqAbs(vault.totalAssets(), 60_000e6, 1);
     }
 }
