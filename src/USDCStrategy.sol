@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IAavePool} from "./interfaces/external/IAavePool.sol";
 import {IAToken} from "./interfaces/external/IAToken.sol";
@@ -21,7 +22,7 @@ import {ISwapRouterV3} from "./interfaces/external/ISwapRouterV3.sol";
 ///         Allocation splits are configurable. Keeper can trigger operations;
 ///         owner (multisig) retains full admin control.
 /// @dev Includes on-chain max slippage cap and rebalance cooldown for safety.
-contract USDCStrategy is IStrategy, Ownable, Pausable {
+contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ─── Enums ───────────────────────────────────────────────────────────
@@ -131,6 +132,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
     event MaxSlippageUpdated(uint256 oldBps, uint256 newBps);
     event RebalanceCooldownUpdated(uint256 oldCooldown, uint256 newCooldown);
     event SplitsCooldownUpdated(uint256 oldCooldown, uint256 newCooldown);
+    event V3PoolFeeUpdated(uint24 oldFee, uint24 newFee);
 
     // ─── Errors ──────────────────────────────────────────────────────────
 
@@ -274,13 +276,13 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
     // ─── IStrategy Implementation ────────────────────────────────────────
 
     /// @inheritdoc IStrategy
-    function deposit(uint256 amount) external override onlyVault whenNotPaused {
+    function deposit(uint256 amount) external override onlyVault whenNotPaused nonReentrant {
         _deployToProtocols(amount);
         emit Deposited(amount);
     }
 
     /// @inheritdoc IStrategy
-    function withdraw(uint256 amount) external override onlyVault whenNotPaused {
+    function withdraw(uint256 amount) external override onlyVault whenNotPaused nonReentrant {
         _withdrawFromProtocols(amount);
         usdc.safeTransfer(vault, amount);
         emit Withdrawn(amount);
@@ -288,7 +290,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
 
     /// @inheritdoc IStrategy
     /// @dev Interface compatibility — calls harvest with empty minAmounts (no slippage protection)
-    function harvest() external override onlyVault whenNotPaused returns (uint256 profit) {
+    function harvest() external override onlyVault whenNotPaused nonReentrant returns (uint256 profit) {
         uint256[] memory minAmounts = new uint256[](yieldSources.length);
         profit = _harvestAll(minAmounts);
         emit Harvested(profit);
@@ -298,7 +300,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
     /// @param minAmountsOut Minimum USDC expected from each yield source's reward swap
     function harvest(
         uint256[] calldata minAmountsOut
-    ) external onlyVault whenNotPaused returns (uint256 profit) {
+    ) external onlyVault whenNotPaused nonReentrant returns (uint256 profit) {
         if (minAmountsOut.length != yieldSources.length) revert InvalidMinAmountsLength();
         profit = _harvestAll(minAmountsOut);
         emit Harvested(profit);
@@ -317,7 +319,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
     // ─── Internal: Deploy ────────────────────────────────────────────────
 
     function _deployToProtocols(uint256 amount) internal {
-        for (uint256 i = 0; i < yieldSources.length; i++) {
+        uint256 len = yieldSources.length;
+        for (uint256 i = 0; i < len; i++) {
             YieldSource storage source = yieldSources[i];
             if (!source.enabled) continue;
 
@@ -346,7 +349,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
         uint256 total = _totalBalance();
         if (total == 0) return;
 
-        for (uint256 i = 0; i < yieldSources.length; i++) {
+        uint256 len = yieldSources.length;
+        for (uint256 i = 0; i < len; i++) {
             YieldSource storage source = yieldSources[i];
             if (!source.enabled) continue;
 
@@ -359,7 +363,9 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
             uint256 actual = fromSource > sourceBalance ? sourceBalance : fromSource;
 
             if (source.protocolType == ProtocolType.Aave) {
-                IAavePool(source.protocolAddress).withdraw(address(usdc), actual, address(this));
+                uint256 withdrawn = IAavePool(source.protocolAddress).withdraw(address(usdc), actual, address(this));
+                // withdrawn is the amount actually withdrawn, validated by Aave
+                require(withdrawn > 0, "Aave withdraw failed");
             } else if (source.protocolType == ProtocolType.Compound) {
                 uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(actual);
                 if (err != 0) revert RedeemFailed(err);
@@ -378,7 +384,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
         if (balance < amount) {
             uint256 deficit = amount - balance;
             
-            for (uint256 i = 0; i < yieldSources.length; i++) {
+            for (uint256 i = 0; i < len; i++) {
                 YieldSource storage source = yieldSources[i];
                 if (!source.enabled) continue;
 
@@ -388,7 +394,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
                 uint256 toWithdraw = deficit > sourceBalance ? sourceBalance : deficit;
 
                 if (source.protocolType == ProtocolType.Aave) {
-                    IAavePool(source.protocolAddress).withdraw(address(usdc), toWithdraw, address(this));
+                    uint256 withdrawn = IAavePool(source.protocolAddress).withdraw(address(usdc), toWithdraw, address(this));
+                    require(withdrawn > 0, "Aave withdraw failed");
                 } else if (source.protocolType == ProtocolType.Compound) {
                     uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(toWithdraw);
                     if (err != 0) revert RedeemFailed(err);
@@ -412,7 +419,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
     function _harvestAll(uint256[] memory minAmountsOut) internal returns (uint256 profit) {
         uint256 balanceBefore = usdc.balanceOf(address(this));
 
-        for (uint256 i = 0; i < yieldSources.length; i++) {
+        uint256 len = yieldSources.length;
+        for (uint256 i = 0; i < len; i++) {
             YieldSource storage source = yieldSources[i];
             if (!source.enabled) continue;
 
@@ -507,11 +515,13 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
         IERC20(tokenIn).safeIncreaseAllowance(router.routerAddress, amountIn);
 
         if (router.routerType == RouterType.V2) {
-            ISailorRouter(router.routerAddress).swapExactTokensForTokens(
+            uint256[] memory amounts = ISailorRouter(router.routerAddress).swapExactTokensForTokens(
                 amountIn, minAmountOut, path, address(this), block.timestamp
             );
+            // amounts is validated by the router (minAmountOut enforced)
+            require(amounts.length > 0, "V2 swap failed");
         } else {
-            ISwapRouterV3(router.routerAddress).exactInputSingle(
+            uint256 amountOut = ISwapRouterV3(router.routerAddress).exactInputSingle(
                 ISwapRouterV3.ExactInputSingleParams({
                     tokenIn: tokenIn,
                     tokenOut: tokenOut,
@@ -523,6 +533,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
                     sqrtPriceLimitX96: 0
                 })
             );
+            // amountOut is validated by the router (minAmountOut enforced)
+            require(amountOut > 0, "V3 swap failed");
         }
     }
 
@@ -543,7 +555,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
     }
 
     function _totalBalance() internal view returns (uint256 total) {
-        for (uint256 i = 0; i < yieldSources.length; i++) {
+        uint256 len = yieldSources.length;
+        for (uint256 i = 0; i < len; i++) {
             if (yieldSources[i].enabled) {
                 total += _getSourceBalance(yieldSources[i]);
             }
@@ -569,7 +582,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
 
         // Validate total splits don't exceed SPLIT_TOTAL
         uint256 totalSplit = _split;
-        for (uint256 i = 0; i < yieldSources.length; i++) {
+        uint256 len = yieldSources.length;
+        for (uint256 i = 0; i < len; i++) {
             totalSplit += yieldSources[i].split;
         }
         if (totalSplit != SPLIT_TOTAL) revert InvalidSplit();
@@ -614,7 +628,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
 
         // Validate total splits
         uint256 totalSplit = newSplit;
-        for (uint256 i = 0; i < yieldSources.length; i++) {
+        uint256 len = yieldSources.length;
+        for (uint256 i = 0; i < len; i++) {
             if (i != index) {
                 totalSplit += yieldSources[i].split;
             }
@@ -705,7 +720,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
 
         // If removing active router, set to first enabled router
         if (index == activeRouterIndex) {
-            for (uint256 i = 0; i < routers.length; i++) {
+            uint256 len = routers.length;
+            for (uint256 i = 0; i < len; i++) {
                 if (routers[i].enabled) {
                     activeRouterIndex = i;
                     break;
@@ -772,7 +788,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
 
     /// @notice Rebalance: withdraw all, re-deploy with current splits
     /// @dev Subject to rebalance cooldown
-    function rebalance() external onlyKeeperOrOwner whenNotPaused {
+    function rebalance() external onlyKeeperOrOwner whenNotPaused nonReentrant {
         if (lastRebalanceTime > 0 && block.timestamp < lastRebalanceTime + rebalanceCooldown) {
             revert RebalanceCooldownActive(lastRebalanceTime + rebalanceCooldown);
         }
@@ -780,8 +796,12 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
         uint256 total = _totalBalance();
         if (total == 0) return;
 
+        // Update state BEFORE external calls (checks-effects-interactions)
+        lastRebalanceTime = block.timestamp;
+
         // Withdraw everything
-        for (uint256 i = 0; i < yieldSources.length; i++) {
+        uint256 len = yieldSources.length;
+        for (uint256 i = 0; i < len; i++) {
             YieldSource storage source = yieldSources[i];
             if (!source.enabled) continue;
 
@@ -809,7 +829,6 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
             _deployToProtocols(usdcBalance);
         }
 
-        lastRebalanceTime = block.timestamp;
         emit Rebalanced();
     }
 
@@ -819,19 +838,21 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
         uint256[] calldata amounts,
         bytes32[][] calldata proofs,
         uint256[] calldata minAmountsOut
-    ) external onlyKeeperOrOwner {
+    ) external onlyKeeperOrOwner nonReentrant {
         if (address(merklDistributor) == address(0)) return;
 
         merklDistributor.claim(address(this), tokens, amounts, proofs);
 
-        for (uint256 i = 0; i < tokens.length; i++) {
+        uint256 tokensLen = tokens.length;
+        uint256 sourcesLen = yieldSources.length;
+        for (uint256 i = 0; i < tokensLen; i++) {
             if (tokens[i] == address(usdc)) continue;
             
             uint256 bal = IERC20(tokens[i]).balanceOf(address(this));
             if (bal == 0) continue;
 
             // Try to find a yield source with matching reward token
-            for (uint256 j = 0; j < yieldSources.length; j++) {
+            for (uint256 j = 0; j < sourcesLen; j++) {
                 if (yieldSources[j].rewardToken == tokens[i] && yieldSources[j].swapPath.length >= 2) {
                     uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
                     _swapDynamic(tokens[i], bal, yieldSources[j].swapPath, minOut);
@@ -865,6 +886,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
     /// @notice Set guardian address (owner only)
     /// @param _guardian Address of the guardian
     function setGuardian(address _guardian) external onlyOwner {
+        if (_guardian == address(0)) revert InvalidAddress();
         address old = guardian;
         guardian = _guardian;
         emit GuardianUpdated(old, _guardian);
@@ -913,7 +935,9 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
 
     /// @notice Set V3 pool fee tier
     function setV3PoolFee(uint24 _fee) external onlyOwner {
+        uint24 oldFee = v3PoolFee;
         v3PoolFee = _fee;
+        emit V3PoolFeeUpdated(oldFee, _fee);
     }
 
     /// @notice Update Merkl distributor address
@@ -996,7 +1020,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
 
     /// @notice Get router V2 address (backward compatibility)
     function routerV2() external view returns (address) {
-        for (uint256 i = 0; i < routers.length; i++) {
+        uint256 len = routers.length;
+        for (uint256 i = 0; i < len; i++) {
             if (routers[i].routerType == RouterType.V2 && routers[i].enabled) {
                 return routers[i].routerAddress;
             }
@@ -1006,7 +1031,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
 
     /// @notice Get router V3 address (backward compatibility)
     function routerV3() external view returns (address) {
-        for (uint256 i = 0; i < routers.length; i++) {
+        uint256 len = routers.length;
+        for (uint256 i = 0; i < len; i++) {
             if (routers[i].routerType == RouterType.V3 && routers[i].enabled) {
                 return routers[i].routerAddress;
             }
@@ -1022,7 +1048,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
 
     /// @notice Set active router by type (backward compatibility)
     function setActiveRouter(RouterType _type) external onlyKeeperOrOwner {
-        for (uint256 i = 0; i < routers.length; i++) {
+        uint256 len = routers.length;
+        for (uint256 i = 0; i < len; i++) {
             if (routers[i].routerType == _type && routers[i].enabled) {
                 activeRouterIndex = i;
                 emit ActiveRouterSet(i);
@@ -1034,7 +1061,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
     /// @notice Set router V2 address (backward compatibility)
     function setRouterV2(address _router) external onlyOwner {
         // Find first V2 router and update, or add new
-        for (uint256 i = 0; i < routers.length; i++) {
+        uint256 len = routers.length;
+        for (uint256 i = 0; i < len; i++) {
             if (routers[i].routerType == RouterType.V2) {
                 routers[i].routerAddress = _router;
                 return;
@@ -1054,7 +1082,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable {
     /// @notice Set router V3 address (backward compatibility)
     function setRouterV3(address _router) external onlyOwner {
         // Find first V3 router and update, or add new
-        for (uint256 i = 0; i < routers.length; i++) {
+        uint256 len = routers.length;
+        for (uint256 i = 0; i < len; i++) {
             if (routers[i].routerType == RouterType.V3) {
                 routers[i].routerAddress = _router;
                 return;

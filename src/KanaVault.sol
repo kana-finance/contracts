@@ -8,6 +8,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 
 /// @title KanaVault
@@ -16,7 +17,7 @@ import {IStrategy} from "./interfaces/IStrategy.sol";
 ///         protocols and auto-compounds rewards.
 /// @dev Implements ERC-4626 with virtual shares offset to prevent inflation attacks.
 ///      One strategy per asset — the strategy handles internal allocation.
-contract KanaVault is ERC4626, Ownable, Pausable {
+contract KanaVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using Math for uint256;
 
@@ -45,10 +46,6 @@ contract KanaVault is ERC4626, Ownable, Pausable {
     /// @notice Performance fee: 10% (immutable)
     uint256 public constant PERFORMANCE_FEE_BPS = 1000;
     uint256 public constant BPS_DENOMINATOR = 10000;
-
-    /// @dev Virtual shares/assets offset to prevent ERC4626 inflation attack
-    /// @dev See OpenZeppelin ERC4626 security docs
-    uint256 private constant _VIRTUAL_OFFSET = 1e6; // 1 USDC worth (6 decimals)
 
     // ─── Events ──────────────────────────────────────────────────────────
 
@@ -100,23 +97,25 @@ contract KanaVault is ERC4626, Ownable, Pausable {
 
     /// @notice Set the strategy contract (owner only)
     /// @param _strategy Address of the strategy (must match vault asset)
-    function setStrategy(IStrategy _strategy) external onlyOwner whenNotPaused {
+    function setStrategy(IStrategy _strategy) external onlyOwner whenNotPaused nonReentrant {
         if (address(_strategy) == address(0)) revert InvalidAddress();
         if (_strategy.asset() != asset()) revert StrategyAssetMismatch();
 
-        address oldStrategy = address(strategy);
+        IStrategy oldStrategy = strategy;
+        address oldStrategyAddr = address(oldStrategy);
 
-        // If there's an existing strategy with funds, withdraw everything first
-        if (oldStrategy != address(0)) {
-            uint256 bal = strategy.balanceOf();
-            if (bal > 0) {
-                strategy.withdraw(bal);
-            }
-            IERC20(asset()).approve(oldStrategy, 0);
-        }
-
+        // Update state BEFORE external calls (checks-effects-interactions)
         strategy = _strategy;
         IERC20(asset()).approve(address(_strategy), type(uint256).max);
+
+        // If there's an existing strategy with funds, withdraw everything first
+        if (oldStrategyAddr != address(0)) {
+            uint256 bal = oldStrategy.balanceOf();
+            if (bal > 0) {
+                oldStrategy.withdraw(bal);
+            }
+            IERC20(asset()).approve(oldStrategyAddr, 0);
+        }
 
         // Deploy idle funds to new strategy
         uint256 idle = IERC20(asset()).balanceOf(address(this));
@@ -125,7 +124,7 @@ contract KanaVault is ERC4626, Ownable, Pausable {
             _strategy.deposit(idle);
         }
 
-        emit StrategySet(oldStrategy, address(_strategy));
+        emit StrategySet(oldStrategyAddr, address(_strategy));
     }
 
     // ─── Harvest ─────────────────────────────────────────────────────────
@@ -134,7 +133,7 @@ contract KanaVault is ERC4626, Ownable, Pausable {
     /// @param minAmountsOut Minimum USDC expected from each yield source's reward swap
     function harvest(
         uint256[] calldata minAmountsOut
-    ) external onlyKeeperOrOwner whenNotPaused {
+    ) external onlyKeeperOrOwner whenNotPaused nonReentrant {
         if (address(strategy) == address(0)) revert NoStrategy();
 
         (bool success, bytes memory data) = address(strategy).call(
@@ -165,7 +164,7 @@ contract KanaVault is ERC4626, Ownable, Pausable {
     function harvest(
         uint256 takaraMinOut,
         uint256 morphoMinOut
-    ) external onlyKeeperOrOwner whenNotPaused {
+    ) external onlyKeeperOrOwner whenNotPaused nonReentrant {
         if (address(strategy) == address(0)) revert NoStrategy();
 
         // Convert to array format (assuming 3 yield sources: Yei, Takara, Morpho)
@@ -218,7 +217,7 @@ contract KanaVault is ERC4626, Ownable, Pausable {
         address receiver,
         uint256 assets,
         uint256 shares
-    ) internal override whenNotPaused {
+    ) internal override whenNotPaused nonReentrant {
         super._deposit(caller, receiver, assets, shares);
 
         if (address(strategy) != address(0)) {
@@ -234,7 +233,7 @@ contract KanaVault is ERC4626, Ownable, Pausable {
         address _owner,
         uint256 assets,
         uint256 shares
-    ) internal override whenNotPaused {
+    ) internal override whenNotPaused nonReentrant {
         uint256 vaultBalance = IERC20(asset()).balanceOf(address(this));
 
         if (vaultBalance < assets && address(strategy) != address(0)) {
@@ -286,6 +285,7 @@ contract KanaVault is ERC4626, Ownable, Pausable {
     /// @notice Set guardian address (owner only)
     /// @param _guardian Address of the guardian
     function setGuardian(address _guardian) external onlyOwner {
+        if (_guardian == address(0)) revert InvalidAddress();
         address old = guardian;
         guardian = _guardian;
         emit GuardianUpdated(old, _guardian);
