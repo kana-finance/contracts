@@ -120,19 +120,53 @@ contract KanaVault is ERC4626, Ownable {
     // ─── Harvest ─────────────────────────────────────────────────────────
 
     /// @notice Harvest rewards from the strategy with slippage protection
-    /// @param takaraMinOut Minimum USDC expected from Takara reward swap
-    /// @param morphoMinOut Minimum USDC expected from Morpho reward swap
+    /// @param minAmountsOut Minimum USDC expected from each yield source's reward swap
+    function harvest(
+        uint256[] calldata minAmountsOut
+    ) external onlyKeeperOrOwner {
+        if (address(strategy) == address(0)) revert NoStrategy();
+
+        (bool success, bytes memory data) = address(strategy).call(
+            abi.encodeWithSignature(
+                "harvest(uint256[])",
+                minAmountsOut
+            )
+        );
+        require(success, "Harvest failed");
+        uint256 profit = abi.decode(data, (uint256));
+
+        if (profit > 0) {
+            uint256 fee = (profit * PERFORMANCE_FEE_BPS) / BPS_DENOMINATOR;
+
+            if (fee > 0) {
+                strategy.withdraw(fee);
+                IERC20(asset()).safeTransfer(feeRecipient, fee);
+            }
+
+            totalProfitAccrued += profit;
+            emit Harvest(profit, fee);
+        }
+    }
+
+    /// @notice Harvest with legacy signature (backward compatibility)
+    /// @param takaraMinOut Minimum USDC expected from Takara (2nd yield source)
+    /// @param morphoMinOut Minimum USDC expected from Morpho (3rd yield source)
     function harvest(
         uint256 takaraMinOut,
         uint256 morphoMinOut
     ) external onlyKeeperOrOwner {
         if (address(strategy) == address(0)) revert NoStrategy();
 
+        // Convert to array format (assuming 3 yield sources: Yei, Takara, Morpho)
+        uint256[] memory minAmountsOut = new uint256[](3);
+        minAmountsOut[0] = 0; // Yei has no rewards
+        minAmountsOut[1] = takaraMinOut;
+        minAmountsOut[2] = morphoMinOut;
+
         (bool success, bytes memory data) = address(strategy).call(
             abi.encodeWithSignature(
-                "harvest(uint256,uint256)",
-                takaraMinOut,
-                morphoMinOut
+                "harvest(uint256[])",
+                minAmountsOut
             )
         );
         require(success, "Harvest failed");
