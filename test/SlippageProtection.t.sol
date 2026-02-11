@@ -172,26 +172,41 @@ contract SlippageProtectionTest is Test {
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 1000e6);
 
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[0] = 0;     // Yei
+        minAmounts[1] = 970e6; // Takara
+        minAmounts[2] = 0;     // Morpho
+
         vm.prank(vault);
-        strategy.harvest(970e6, 0);
+        strategy.harvest(minAmounts);
     }
 
     function test_harvest_revertsOnHighSlippage() public {
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 1000e6);
 
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[0] = 0;     // Yei
+        minAmounts[1] = 990e6; // Takara
+        minAmounts[2] = 0;     // Morpho
+
         vm.prank(vault);
         vm.expectRevert("INSUFFICIENT_OUTPUT_AMOUNT");
-        strategy.harvest(990e6, 0);
+        strategy.harvest(minAmounts);
     }
 
     function test_harvest_morphoRevertOnHighSlippage() public {
         _deposit(100_000e6);
         morphoReward.mint(address(strategy), 1000e6);
 
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[0] = 0;     // Yei
+        minAmounts[1] = 0;     // Takara
+        minAmounts[2] = 990e6; // Morpho
+
         vm.prank(vault);
         vm.expectRevert("INSUFFICIENT_OUTPUT_AMOUNT");
-        strategy.harvest(0, 990e6);
+        strategy.harvest(minAmounts);
     }
 
     function test_harvest_bothRewards() public {
@@ -199,27 +214,41 @@ contract SlippageProtectionTest is Test {
         takaraReward.mint(address(strategy), 500e6);
         morphoReward.mint(address(strategy), 300e6);
 
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[0] = 0;     // Yei
+        minAmounts[1] = 480e6; // Takara
+        minAmounts[2] = 290e6; // Morpho
+
         vm.prank(vault);
-        strategy.harvest(480e6, 290e6);
+        strategy.harvest(minAmounts);
     }
 
     function test_harvest_zeroMins() public {
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 1000e6);
 
+        uint256[] memory minAmounts = new uint256[](3);
+
         vm.prank(vault);
-        strategy.harvest(0, 0);
+        strategy.harvest(minAmounts);
     }
 
     function test_harvest_onlyVault() public {
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[0] = 100;
+        minAmounts[1] = 100;
+        minAmounts[2] = 100;
+
         vm.expectRevert(USDCStrategy.OnlyVault.selector);
-        strategy.harvest(100, 100);
+        strategy.harvest(minAmounts);
     }
 
     function test_harvest_noRewardsNoRevert() public {
         _deposit(50_000e6);
+        uint256[] memory minAmounts = new uint256[](3);
+
         vm.prank(vault);
-        uint256 profit = strategy.harvest(0, 0);
+        uint256 profit = strategy.harvest(minAmounts);
         assertEq(profit, 0);
     }
 
@@ -228,17 +257,27 @@ contract SlippageProtectionTest is Test {
         takaraReward.mint(address(strategy), 10_000e6);
         badRouter.setSlippage(2000);
 
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[0] = 0;      // Yei
+        minAmounts[1] = 9900e6; // Takara
+        minAmounts[2] = 0;      // Morpho
+
         vm.prank(vault);
         vm.expectRevert("INSUFFICIENT_OUTPUT_AMOUNT");
-        strategy.harvest(9900e6, 0);
+        strategy.harvest(minAmounts);
     }
 
     function test_harvest_returnsProfit() public {
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 5000e6);
 
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[0] = 0;      // Yei
+        minAmounts[1] = 4800e6; // Takara
+        minAmounts[2] = 0;      // Morpho
+
         vm.prank(vault);
-        uint256 profit = strategy.harvest(4800e6, 0);
+        uint256 profit = strategy.harvest(minAmounts);
         assertEq(profit, 4900e6);
     }
 
@@ -504,13 +543,18 @@ contract SlippageProtectionTest is Test {
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 1000e6);
 
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[0] = 0;     // Yei
+        minAmounts[1] = 900e6; // Takara
+        minAmounts[2] = 0;     // Morpho
+
         vm.prank(vault);
         vm.expectRevert(abi.encodeWithSelector(
             USDCStrategy.SlippageExceedsCap.selector,
             900e6,  // minAmountOut provided
             950e6   // minRequired (1000 * 9500 / 10000)
         ));
-        strategy.harvest(900e6, 0);
+        strategy.harvest(minAmounts);
     }
 
     function test_slippageCap_acceptsAboveThreshold() public {
@@ -518,8 +562,13 @@ contract SlippageProtectionTest is Test {
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 1000e6);
 
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[0] = 0;     // Yei
+        minAmounts[1] = 960e6; // Takara
+        minAmounts[2] = 0;     // Morpho
+
         vm.prank(vault);
-        strategy.harvest(960e6, 0);
+        strategy.harvest(minAmounts);
     }
 
     function test_slippageCap_zeroMinSkipsValidation() public {
@@ -527,8 +576,10 @@ contract SlippageProtectionTest is Test {
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 1000e6);
 
+        uint256[] memory minAmounts = new uint256[](3);
+
         vm.prank(vault);
-        strategy.harvest(0, 0); // should not revert
+        strategy.harvest(minAmounts); // should not revert
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -601,7 +652,7 @@ contract SlippageProtectionTest is Test {
 
         takaraReward.mint(address(strat), 5000e6);
 
-        // Keeper harvests through vault
+        // Keeper harvests through vault (using legacy signature)
         vm.prank(keeperAddr);
         kanaVault.harvest(4800e6, 0);
     }
@@ -658,13 +709,18 @@ contract SlippageProtectionTest is Test {
         uint256 expectedOut = (rewardAmt * (10000 - slippageBps)) / 10000;
         uint256 minOut = (rewardAmt * 99) / 100;
 
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[0] = 0;     // Yei
+        minAmounts[1] = minOut; // Takara
+        minAmounts[2] = 0;     // Morpho
+
         if (expectedOut >= minOut) {
             vm.prank(vault);
-            strategy.harvest(minOut, 0);
+            strategy.harvest(minAmounts);
         } else {
             vm.prank(vault);
             vm.expectRevert("INSUFFICIENT_OUTPUT_AMOUNT");
-            strategy.harvest(minOut, 0);
+            strategy.harvest(minAmounts);
         }
     }
 }
