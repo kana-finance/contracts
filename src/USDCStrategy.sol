@@ -815,7 +815,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             if (balance == 0) continue;
 
             if (source.protocolType == ProtocolType.Aave) {
-                IAavePool(source.protocolAddress).withdraw(address(usdc), balance, address(this));
+                uint256 withdrawn = IAavePool(source.protocolAddress).withdraw(address(usdc), balance, address(this));
+                require(withdrawn > 0, "Aave withdraw failed");
             } else if (source.protocolType == ProtocolType.Compound) {
                 uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(balance);
                 if (err != 0) revert RedeemFailed(err);
