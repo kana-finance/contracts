@@ -88,6 +88,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
     // ─── Constants ───────────────────────────────────────────────────────
 
     uint256 public constant SPLIT_TOTAL = 10000; // 100%
+    uint256 public constant MAX_YIELD_SOURCES = 10;
 
     // ─── Safety: Slippage Cap ────────────────────────────────────────────
 
@@ -148,6 +149,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
     error RebalanceCooldownActive(uint256 nextAllowed);
     error SplitsCooldownActive(uint256 nextAllowed);
     error SlippageTooHigh();
+    error TooManyYieldSources();
     error InvalidMinAmountsLength();
 
     // ─── Modifiers ───────────────────────────────────────────────────────
@@ -333,12 +335,13 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                 uint256 err = ICErc20(source.protocolAddress).mint(toSource);
                 if (err != 0) revert MintFailed(err);
             } else if (source.protocolType == ProtocolType.Morpho) {
-                IMorpho(source.protocolAddress).supply(
+                uint256 supplied = IMorpho(source.protocolAddress).supply(
                     address(usdc), 
                     toSource, 
                     address(this), 
                     source.morphoMaxIterations
                 );
+                require(supplied > 0, "Morpho supply failed");
             }
         }
     }
@@ -370,12 +373,13 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                 uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(actual);
                 if (err != 0) revert RedeemFailed(err);
             } else if (source.protocolType == ProtocolType.Morpho) {
-                IMorpho(source.protocolAddress).withdraw(
+                uint256 withdrawn = IMorpho(source.protocolAddress).withdraw(
                     address(usdc), 
                     actual, 
                     address(this), 
                     source.morphoMaxIterations
                 );
+                require(withdrawn > 0, "Morpho withdraw failed");
             }
         }
 
@@ -400,12 +404,13 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                     uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(toWithdraw);
                     if (err != 0) revert RedeemFailed(err);
                 } else if (source.protocolType == ProtocolType.Morpho) {
-                    IMorpho(source.protocolAddress).withdraw(
+                    uint256 mWithdrawn = IMorpho(source.protocolAddress).withdraw(
                         address(usdc), 
                         toWithdraw, 
                         address(this), 
                         source.morphoMaxIterations
                     );
+                    require(mWithdrawn > 0, "Morpho withdraw failed");
                 }
 
                 balance = usdc.balanceOf(address(this));
@@ -579,6 +584,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
         uint256 _morphoMaxIter
     ) external onlyOwner {
         if (_protocolAddress == address(0)) revert InvalidAddress();
+        if (yieldSources.length >= MAX_YIELD_SOURCES) revert TooManyYieldSources();
 
         // Validate total splits don't exceed SPLIT_TOTAL
         uint256 totalSplit = _split;
@@ -814,12 +820,13 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                 uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(balance);
                 if (err != 0) revert RedeemFailed(err);
             } else if (source.protocolType == ProtocolType.Morpho) {
-                IMorpho(source.protocolAddress).withdraw(
+                uint256 withdrawn = IMorpho(source.protocolAddress).withdraw(
                     address(usdc), 
                     balance, 
                     address(this), 
                     source.morphoMaxIterations
                 );
+                require(withdrawn > 0, "Morpho withdraw failed");
             }
         }
 

@@ -106,7 +106,7 @@ contract KanaVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
 
         // Update state BEFORE external calls (checks-effects-interactions)
         strategy = _strategy;
-        IERC20(asset()).approve(address(_strategy), type(uint256).max);
+        SafeERC20.forceApprove(IERC20(asset()), address(_strategy), type(uint256).max);
 
         // If there's an existing strategy with funds, withdraw everything first
         if (oldStrategyAddr != address(0)) {
@@ -114,7 +114,7 @@ contract KanaVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
             if (bal > 0) {
                 oldStrategy.withdraw(bal);
             }
-            IERC20(asset()).approve(oldStrategyAddr, 0);
+            SafeERC20.forceApprove(IERC20(asset()), oldStrategyAddr, 0);
         }
 
         // Deploy idle funds to new strategy
