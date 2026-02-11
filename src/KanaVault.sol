@@ -7,6 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 
 /// @title KanaVault
@@ -15,7 +16,7 @@ import {IStrategy} from "./interfaces/IStrategy.sol";
 ///         protocols and auto-compounds rewards.
 /// @dev Implements ERC-4626 with virtual shares offset to prevent inflation attacks.
 ///      One strategy per asset — the strategy handles internal allocation.
-contract KanaVault is ERC4626, Ownable {
+contract KanaVault is ERC4626, Ownable, Pausable {
     using SafeERC20 for IERC20;
     using Math for uint256;
 
@@ -36,6 +37,9 @@ contract KanaVault is ERC4626, Ownable {
     /// @notice Keeper address — can trigger harvest
     address public keeper;
 
+    /// @notice Guardian address — can pause in emergencies
+    address public guardian;
+
     // ─── Constants ───────────────────────────────────────────────────────
 
     /// @notice Performance fee: 10% (immutable)
@@ -53,6 +57,7 @@ contract KanaVault is ERC4626, Ownable {
     event FeeRecipientUpdated(address oldRecipient, address newRecipient);
     event FeeRecipientLocked(address recipient);
     event KeeperUpdated(address indexed oldKeeper, address indexed newKeeper);
+    event GuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
 
     // ─── Errors ──────────────────────────────────────────────────────────
 
@@ -61,11 +66,17 @@ contract KanaVault is ERC4626, Ownable {
     error StrategyAssetMismatch();
     error FeeRecipientIsLocked();
     error NotKeeperOrOwner();
+    error NotGuardianOrOwner();
 
     // ─── Modifiers ───────────────────────────────────────────────────────
 
     modifier onlyKeeperOrOwner() {
         if (msg.sender != keeper && msg.sender != owner()) revert NotKeeperOrOwner();
+        _;
+    }
+
+    modifier onlyGuardianOrOwner() {
+        if (msg.sender != guardian && msg.sender != owner()) revert NotGuardianOrOwner();
         _;
     }
 
@@ -89,7 +100,7 @@ contract KanaVault is ERC4626, Ownable {
 
     /// @notice Set the strategy contract (owner only)
     /// @param _strategy Address of the strategy (must match vault asset)
-    function setStrategy(IStrategy _strategy) external onlyOwner {
+    function setStrategy(IStrategy _strategy) external onlyOwner whenNotPaused {
         if (address(_strategy) == address(0)) revert InvalidAddress();
         if (_strategy.asset() != asset()) revert StrategyAssetMismatch();
 
@@ -123,7 +134,7 @@ contract KanaVault is ERC4626, Ownable {
     /// @param minAmountsOut Minimum USDC expected from each yield source's reward swap
     function harvest(
         uint256[] calldata minAmountsOut
-    ) external onlyKeeperOrOwner {
+    ) external onlyKeeperOrOwner whenNotPaused {
         if (address(strategy) == address(0)) revert NoStrategy();
 
         (bool success, bytes memory data) = address(strategy).call(
@@ -154,7 +165,7 @@ contract KanaVault is ERC4626, Ownable {
     function harvest(
         uint256 takaraMinOut,
         uint256 morphoMinOut
-    ) external onlyKeeperOrOwner {
+    ) external onlyKeeperOrOwner whenNotPaused {
         if (address(strategy) == address(0)) revert NoStrategy();
 
         // Convert to array format (assuming 3 yield sources: Yei, Takara, Morpho)
@@ -207,7 +218,7 @@ contract KanaVault is ERC4626, Ownable {
         address receiver,
         uint256 assets,
         uint256 shares
-    ) internal override {
+    ) internal override whenNotPaused {
         super._deposit(caller, receiver, assets, shares);
 
         if (address(strategy) != address(0)) {
@@ -223,7 +234,7 @@ contract KanaVault is ERC4626, Ownable {
         address _owner,
         uint256 assets,
         uint256 shares
-    ) internal override {
+    ) internal override whenNotPaused {
         uint256 vaultBalance = IERC20(asset()).balanceOf(address(this));
 
         if (vaultBalance < assets && address(strategy) != address(0)) {
@@ -270,5 +281,24 @@ contract KanaVault is ERC4626, Ownable {
         if (feeRecipient == address(0)) revert InvalidAddress();
         feeRecipientLocked = true;
         emit FeeRecipientLocked(feeRecipient);
+    }
+
+    /// @notice Set guardian address (owner only)
+    /// @param _guardian Address of the guardian
+    function setGuardian(address _guardian) external onlyOwner {
+        address old = guardian;
+        guardian = _guardian;
+        emit GuardianUpdated(old, _guardian);
+    }
+
+    /// @notice Pause the contract (guardian or owner only)
+    /// @dev Blocks deposits, withdrawals, harvest, and strategy changes
+    function pause() external onlyGuardianOrOwner {
+        _pause();
+    }
+
+    /// @notice Unpause the contract (owner only)
+    function unpause() external onlyOwner {
+        _unpause();
     }
 }

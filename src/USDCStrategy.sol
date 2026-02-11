@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IAavePool} from "./interfaces/external/IAavePool.sol";
 import {IAToken} from "./interfaces/external/IAToken.sol";
@@ -20,7 +21,7 @@ import {ISwapRouterV3} from "./interfaces/external/ISwapRouterV3.sol";
 ///         Allocation splits are configurable. Keeper can trigger operations;
 ///         owner (multisig) retains full admin control.
 /// @dev Includes on-chain max slippage cap and rebalance cooldown for safety.
-contract USDCStrategy is IStrategy, Ownable {
+contract USDCStrategy is IStrategy, Ownable, Pausable {
     using SafeERC20 for IERC20;
 
     // ─── Enums ───────────────────────────────────────────────────────────
@@ -64,6 +65,9 @@ contract USDCStrategy is IStrategy, Ownable {
 
     /// @notice Keeper address — can trigger harvest, rebalance, claims
     address public keeper;
+
+    /// @notice Guardian address — can pause in emergencies
+    address public guardian;
 
     /// @notice Dynamic yield sources
     YieldSource[] public yieldSources;
@@ -123,6 +127,7 @@ contract USDCStrategy is IStrategy, Ownable {
     event Rebalanced();
     event VaultUpdated(address indexed oldVault, address indexed newVault);
     event KeeperUpdated(address indexed oldKeeper, address indexed newKeeper);
+    event GuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
     event MaxSlippageUpdated(uint256 oldBps, uint256 newBps);
     event RebalanceCooldownUpdated(uint256 oldCooldown, uint256 newCooldown);
     event SplitsCooldownUpdated(uint256 oldCooldown, uint256 newCooldown);
@@ -136,6 +141,7 @@ contract USDCStrategy is IStrategy, Ownable {
     error MintFailed(uint256 errorCode);
     error RedeemFailed(uint256 errorCode);
     error NotKeeperOrOwner();
+    error NotGuardianOrOwner();
     error SlippageExceedsCap(uint256 minAmountOut, uint256 minRequired);
     error RebalanceCooldownActive(uint256 nextAllowed);
     error SplitsCooldownActive(uint256 nextAllowed);
@@ -151,6 +157,11 @@ contract USDCStrategy is IStrategy, Ownable {
 
     modifier onlyKeeperOrOwner() {
         if (msg.sender != keeper && msg.sender != owner()) revert NotKeeperOrOwner();
+        _;
+    }
+
+    modifier onlyGuardianOrOwner() {
+        if (msg.sender != guardian && msg.sender != owner()) revert NotGuardianOrOwner();
         _;
     }
 
@@ -263,13 +274,13 @@ contract USDCStrategy is IStrategy, Ownable {
     // ─── IStrategy Implementation ────────────────────────────────────────
 
     /// @inheritdoc IStrategy
-    function deposit(uint256 amount) external override onlyVault {
+    function deposit(uint256 amount) external override onlyVault whenNotPaused {
         _deployToProtocols(amount);
         emit Deposited(amount);
     }
 
     /// @inheritdoc IStrategy
-    function withdraw(uint256 amount) external override onlyVault {
+    function withdraw(uint256 amount) external override onlyVault whenNotPaused {
         _withdrawFromProtocols(amount);
         usdc.safeTransfer(vault, amount);
         emit Withdrawn(amount);
@@ -277,7 +288,7 @@ contract USDCStrategy is IStrategy, Ownable {
 
     /// @inheritdoc IStrategy
     /// @dev Interface compatibility — calls harvest with empty minAmounts (no slippage protection)
-    function harvest() external override onlyVault returns (uint256 profit) {
+    function harvest() external override onlyVault whenNotPaused returns (uint256 profit) {
         uint256[] memory minAmounts = new uint256[](yieldSources.length);
         profit = _harvestAll(minAmounts);
         emit Harvested(profit);
@@ -287,7 +298,7 @@ contract USDCStrategy is IStrategy, Ownable {
     /// @param minAmountsOut Minimum USDC expected from each yield source's reward swap
     function harvest(
         uint256[] calldata minAmountsOut
-    ) external onlyVault returns (uint256 profit) {
+    ) external onlyVault whenNotPaused returns (uint256 profit) {
         if (minAmountsOut.length != yieldSources.length) revert InvalidMinAmountsLength();
         profit = _harvestAll(minAmountsOut);
         emit Harvested(profit);
@@ -744,7 +755,7 @@ contract USDCStrategy is IStrategy, Ownable {
         uint256 _splitYei,
         uint256 _splitTakara,
         uint256 _splitMorpho
-    ) external onlyKeeperOrOwner {
+    ) external onlyKeeperOrOwner whenNotPaused {
         if (_splitYei + _splitTakara + _splitMorpho != SPLIT_TOTAL) revert InvalidSplit();
         if (lastSplitsTime > 0 && block.timestamp < lastSplitsTime + splitsCooldown) {
             revert SplitsCooldownActive(lastSplitsTime + splitsCooldown);
@@ -761,7 +772,7 @@ contract USDCStrategy is IStrategy, Ownable {
 
     /// @notice Rebalance: withdraw all, re-deploy with current splits
     /// @dev Subject to rebalance cooldown
-    function rebalance() external onlyKeeperOrOwner {
+    function rebalance() external onlyKeeperOrOwner whenNotPaused {
         if (lastRebalanceTime > 0 && block.timestamp < lastRebalanceTime + rebalanceCooldown) {
             revert RebalanceCooldownActive(lastRebalanceTime + rebalanceCooldown);
         }
@@ -851,6 +862,25 @@ contract USDCStrategy is IStrategy, Ownable {
         emit KeeperUpdated(old, address(0));
     }
 
+    /// @notice Set guardian address (owner only)
+    /// @param _guardian Address of the guardian
+    function setGuardian(address _guardian) external onlyOwner {
+        address old = guardian;
+        guardian = _guardian;
+        emit GuardianUpdated(old, _guardian);
+    }
+
+    /// @notice Pause the contract (guardian or owner only)
+    /// @dev Blocks deposits, withdrawals, harvest, rebalance, and setSplits
+    function pause() external onlyGuardianOrOwner {
+        _pause();
+    }
+
+    /// @notice Unpause the contract (owner only)
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
     /// @notice Update the vault address
     function setVault(address _vault) external onlyOwner {
         if (_vault == address(0)) revert InvalidAddress();
@@ -891,10 +921,20 @@ contract USDCStrategy is IStrategy, Ownable {
         merklDistributor = IMerklDistributor(_distributor);
     }
 
-    /// @notice Rescue stuck tokens (not USDC)
+    /// @notice Rescue stuck tokens
+    /// @dev For USDC, only rescues loose balance (not deployed to protocols)
+    /// @param _token Token address to rescue
+    /// @param _amount Amount to rescue (ignored for USDC, uses actual balance)
     function rescueToken(address _token, uint256 _amount) external onlyOwner {
-        if (_token == address(usdc)) revert InvalidAddress();
-        IERC20(_token).safeTransfer(owner(), _amount);
+        if (_token == address(usdc)) {
+            // Only rescue loose USDC not deployed to any protocol
+            uint256 looseBalance = usdc.balanceOf(address(this));
+            if (looseBalance > 0) {
+                usdc.safeTransfer(owner(), looseBalance);
+            }
+        } else {
+            IERC20(_token).safeTransfer(owner(), _amount);
+        }
     }
 
     // ─── Legacy Getters (Backward Compatibility) ─────────────────────────

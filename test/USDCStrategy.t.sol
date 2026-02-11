@@ -487,9 +487,15 @@ contract USDCStrategyTest is Test {
         assertEq(randomToken.balanceOf(owner) - ownerBalBefore, 1000e18);
     }
     
-    function test_rescueToken_cannotRescueUsdc() public {
-        vm.expectRevert(USDCStrategy.InvalidAddress.selector);
+    function test_rescueToken_canRescueLooseUsdc() public {
+        // Send loose USDC to strategy
+        usdc.mint(address(strategy), 1000e6);
+        
+        uint256 ownerBalBefore = usdc.balanceOf(owner);
         strategy.rescueToken(address(usdc), 1000e6);
+        
+        // Should rescue the loose balance
+        assertEq(usdc.balanceOf(owner) - ownerBalBefore, 1000e6);
     }
     
     function test_rescueToken_onlyOwner() public {
