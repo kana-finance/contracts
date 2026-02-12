@@ -12,9 +12,9 @@ contract DeployMainnet is Script {
     address constant YEI_POOL = 0x4a4d9abD36F923cBA0Af62A39C01dEC2944fb638;
     address constant YEI_AUSDC = 0x817B3C191092694C65f25B4d38D4935a8aB65616;
     address constant TAKARA_CUSDC = 0xd1E6a6F58A29F64ab2365947ACb53EfEB6Cc05e0;
-    address constant TAKARA_COMPTROLLER = 0x71034bf5eC0FAd7aEE81a213403c8892F3d8CAeE;
+    address constant TAKARA_COMPTROLLER = 0x56A171Acb1bBa46D4fdF21AfBE89377574B8D9BD;
     address constant MORPHO = 0x015F10a56e97e02437D294815D8e079e1903E41C;
-    address constant DRAGONSWAP_ROUTER = 0x11DA6463D6Cb5a03411Dbf5ab6f6bc3997Ac7428;
+    address constant DRAGONSWAP_ROUTER = 0xa4cF2F53D1195aDDdE9e4D3aCa54f556895712f2;
     address constant SAILOR_ROUTER = 0xd1EFe48B71Acd98Db16FcB9E7152B086647Ef544;
 
     KanaVault public vault;
@@ -49,8 +49,8 @@ contract DeployMainnet is Script {
 
         strategy = new USDCStrategy(
             addrs,
-            10000,  // 100% Yei initially
-            0,      // 0% Takara
+            0,      // 0% Yei
+            10000,  // 100% Takara initially
             0,      // 0% Morpho
             4,      // Morpho max iterations
             500,    // 5% max slippage cap
@@ -66,6 +66,12 @@ contract DeployMainnet is Script {
         vault.setKeeper(deployer);
         strategy.setKeeper(deployer);
 
+        // 5. First deposit — 10 USDC to prevent inflation attack
+        uint256 seedAmount = 10e6; // 10 USDC
+        IERC20(USDC).approve(address(vault), seedAmount);
+        vault.deposit(seedAmount, deployer);
+        console.log("Seed deposit: 10 USDC");
+
         vm.stopBroadcast();
 
         console.log("");
@@ -75,6 +81,6 @@ contract DeployMainnet is Script {
         console.log("Fee: 10% (constant)");
         console.log("Max Slippage Cap: 5%");
         console.log("Rebalance Cooldown: 1 hour");
-        console.log("Initial Allocation: 100% Yei");
+        console.log("Initial Allocation: 100% Takara");
     }
 }
