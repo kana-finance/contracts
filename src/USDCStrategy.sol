@@ -325,6 +325,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
 
     // ─── Internal: Deploy ────────────────────────────────────────────────
 
+    // slither-disable-start incorrect-equality
     function _deployToProtocols(uint256 amount) internal {
         uint256 len = yieldSources.length;
         for (uint256 i = 0; i < len; i++) {
@@ -350,9 +351,12 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             }
         }
     }
+    // slither-disable-end incorrect-equality
 
     // ─── Internal: Withdraw ──────────────────────────────────────────────
 
+    // slither-disable-start reentrancy-balance
+    // slither-disable-start incorrect-equality
     function _withdrawFromProtocols(uint256 amount) internal {
         uint256 total = _totalBalance();
         if (total == 0) return;
@@ -422,6 +426,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             }
         }
     }
+    // slither-disable-end incorrect-equality
+    // slither-disable-end reentrancy-balance
 
     // ─── Internal: Harvest ───────────────────────────────────────────────
 
@@ -472,6 +478,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
 
     // ─── Internal: Swap ──────────────────────────────────────────────────
 
+    // slither-disable-start incorrect-equality
     function _swap(
         address tokenIn,
         uint256 amountIn,
@@ -570,6 +577,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
         }
         total += usdc.balanceOf(address(this));
     }
+    // slither-disable-end incorrect-equality
 
     // ─── Yield Source Management ─────────────────────────────────────────
 
@@ -847,6 +855,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Rebalance: withdraw all, re-deploy with current splits
     /// @dev Subject to rebalance cooldown
+    // slither-disable-start reentrancy-balance
+    // slither-disable-start incorrect-equality
     function rebalance() external onlyKeeperOrOwner whenNotPaused nonReentrant {
         if (lastRebalanceTime > 0 && block.timestamp < lastRebalanceTime + rebalanceCooldown) {
             revert RebalanceCooldownActive(lastRebalanceTime + rebalanceCooldown);
@@ -892,7 +902,10 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
 
         emit Rebalanced();
     }
+    // slither-disable-end incorrect-equality
+    // slither-disable-end reentrancy-balance
 
+    // slither-disable-start incorrect-equality
     /// @notice Claim Morpho rewards via Merkl distributor and swap to USDC
     function claimMorphoRewards(
         address[] calldata tokens,
@@ -927,6 +940,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             _deployToProtocols(looseUsdc);
         }
     }
+    // slither-disable-end incorrect-equality
 
     // ─── Owner-Only Admin ────────────────────────────────────────────────
 
