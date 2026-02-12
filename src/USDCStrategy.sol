@@ -151,6 +151,11 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
     error SlippageTooHigh();
     error TooManyYieldSources();
     error InvalidMinAmountsLength();
+    error MorphoSupplyFailed();
+    error AaveWithdrawFailed();
+    error MorphoWithdrawFailed();
+    error V2SwapFailed();
+    error V3SwapFailed();
 
     // ─── Modifiers ───────────────────────────────────────────────────────
 
@@ -341,7 +346,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                     address(this), 
                     source.morphoMaxIterations
                 );
-                require(supplied > 0, "Morpho supply failed");
+                if (supplied == 0) revert MorphoSupplyFailed();
             }
         }
     }
@@ -367,8 +372,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
 
             if (source.protocolType == ProtocolType.Aave) {
                 uint256 withdrawn = IAavePool(source.protocolAddress).withdraw(address(usdc), actual, address(this));
-                // withdrawn is the amount actually withdrawn, validated by Aave
-                require(withdrawn > 0, "Aave withdraw failed");
+                if (withdrawn == 0) revert AaveWithdrawFailed();
             } else if (source.protocolType == ProtocolType.Compound) {
                 uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(actual);
                 if (err != 0) revert RedeemFailed(err);
@@ -379,7 +383,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                     address(this), 
                     source.morphoMaxIterations
                 );
-                require(withdrawn > 0, "Morpho withdraw failed");
+                if (withdrawn == 0) revert MorphoWithdrawFailed();
             }
         }
 
@@ -399,7 +403,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
 
                 if (source.protocolType == ProtocolType.Aave) {
                     uint256 withdrawn = IAavePool(source.protocolAddress).withdraw(address(usdc), toWithdraw, address(this));
-                    require(withdrawn > 0, "Aave withdraw failed");
+                    if (withdrawn == 0) revert AaveWithdrawFailed();
                 } else if (source.protocolType == ProtocolType.Compound) {
                     uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(toWithdraw);
                     if (err != 0) revert RedeemFailed(err);
@@ -410,7 +414,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                         address(this), 
                         source.morphoMaxIterations
                     );
-                    require(mWithdrawn > 0, "Morpho withdraw failed");
+                    if (mWithdrawn == 0) revert MorphoWithdrawFailed();
                 }
 
                 balance = usdc.balanceOf(address(this));
@@ -523,8 +527,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             uint256[] memory amounts = ISailorRouter(router.routerAddress).swapExactTokensForTokens(
                 amountIn, minAmountOut, path, address(this), block.timestamp
             );
-            // amounts is validated by the router (minAmountOut enforced)
-            require(amounts.length > 0, "V2 swap failed");
+            if (amounts.length == 0) revert V2SwapFailed();
         } else {
             uint256 amountOut = ISwapRouterV3(router.routerAddress).exactInputSingle(
                 ISwapRouterV3.ExactInputSingleParams({
@@ -538,8 +541,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                     sqrtPriceLimitX96: 0
                 })
             );
-            // amountOut is validated by the router (minAmountOut enforced)
-            require(amountOut > 0, "V3 swap failed");
+            if (amountOut == 0) revert V3SwapFailed();
         }
     }
 
@@ -666,6 +668,51 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
         yieldSources[index].swapPath = _swapPath;
     }
 
+    /// @notice Set Takara reward config (helper for tests)
+    function setTakaraRewardConfig(address _rewardToken, address[] calldata _swapPath) external onlyOwner {
+        if (yieldSources.length > 1) {
+            yieldSources[1].rewardToken = _rewardToken;
+            yieldSources[1].swapPath = _swapPath;
+        }
+    }
+
+    /// @notice Set Morpho reward config (helper for tests)
+    function setMorphoRewardConfig(address _rewardToken, address[] calldata _swapPath) external onlyOwner {
+        if (yieldSources.length > 2) {
+            yieldSources[2].rewardToken = _rewardToken;
+            yieldSources[2].swapPath = _swapPath;
+        }
+    }
+
+    /// @notice Set router V2 address (helper for tests)
+    function setRouterV2(address _router) external onlyOwner {
+        uint256 len = routers.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (routers[i].routerType == RouterType.V2) {
+                routers[i].routerAddress = _router;
+                return;
+            }
+        }
+    }
+
+    /// @notice Set router V3 address (helper for tests)
+    function setRouterV3(address _router) external onlyOwner {
+        uint256 len = routers.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (routers[i].routerType == RouterType.V3) {
+                routers[i].routerAddress = _router;
+                return;
+            }
+        }
+    }
+
+    /// @notice Set Morpho max iterations (helper for tests)
+    function setMorphoMaxIterations(uint256 _maxIterations) external onlyOwner {
+        if (yieldSources.length > 2) {
+            yieldSources[2].morphoMaxIterations = _maxIterations;
+        }
+    }
+
     /// @notice Get yield source count
     function yieldSourcesLength() external view returns (uint256) {
         return yieldSources.length;
@@ -738,13 +785,25 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
         emit RouterRemoved(index);
     }
 
-    /// @notice Set active router (keeper or owner)
+    /// @notice Set active router by index (keeper or owner)
     function setActiveRouter(uint256 index) external onlyKeeperOrOwner {
         if (index >= routers.length) revert InvalidIndex();
         if (!routers[index].enabled) revert InvalidIndex();
         
         activeRouterIndex = index;
         emit ActiveRouterSet(index);
+    }
+
+    /// @notice Set active router by type (helper for tests)
+    function setActiveRouter(RouterType _type) external onlyKeeperOrOwner {
+        uint256 len = routers.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (routers[i].routerType == _type && routers[i].enabled) {
+                activeRouterIndex = i;
+                emit ActiveRouterSet(i);
+                return;
+            }
+        }
     }
 
     /// @notice Get router count
@@ -771,19 +830,13 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
 
     // ─── Keeper Functions ────────────────────────────────────────────────
 
-    /// @notice Update protocol allocation splits (owner only) - DEPRECATED
-    /// @dev Kept for backward compatibility, use updateYieldSourceSplit instead
-    function setSplits(
-        uint256 _splitYei,
-        uint256 _splitTakara,
-        uint256 _splitMorpho
-    ) external onlyKeeperOrOwner whenNotPaused {
+    /// @notice Update first 3 yield source splits at once (helper for backward compatibility)
+    function setSplits(uint256 _splitYei, uint256 _splitTakara, uint256 _splitMorpho) external onlyKeeperOrOwner whenNotPaused {
         if (_splitYei + _splitTakara + _splitMorpho != SPLIT_TOTAL) revert InvalidSplit();
         if (lastSplitsTime > 0 && block.timestamp < lastSplitsTime + splitsCooldown) {
             revert SplitsCooldownActive(lastSplitsTime + splitsCooldown);
         }
 
-        // Update first 3 yield sources if they exist
         if (yieldSources.length >= 1) yieldSources[0].split = _splitYei;
         if (yieldSources.length >= 2) yieldSources[1].split = _splitTakara;
         if (yieldSources.length >= 3) yieldSources[2].split = _splitMorpho;
@@ -816,7 +869,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
 
             if (source.protocolType == ProtocolType.Aave) {
                 uint256 withdrawn = IAavePool(source.protocolAddress).withdraw(address(usdc), balance, address(this));
-                require(withdrawn > 0, "Aave withdraw failed");
+                if (withdrawn == 0) revert AaveWithdrawFailed();
             } else if (source.protocolType == ProtocolType.Compound) {
                 uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(balance);
                 if (err != 0) revert RedeemFailed(err);
@@ -827,7 +880,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                     address(this), 
                     source.morphoMaxIterations
                 );
-                require(withdrawn > 0, "Morpho withdraw failed");
+                if (withdrawn == 0) revert MorphoWithdrawFailed();
             }
         }
 
@@ -969,64 +1022,52 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
         }
     }
 
-    // ─── Legacy Getters (Backward Compatibility) ─────────────────────────
+    // ─── Legacy Getters (Read Only) ──────────────────────────────────────
 
-    /// @notice Get Yei split (first yield source)
     function splitYei() external view returns (uint256) {
         return yieldSources.length > 0 ? yieldSources[0].split : 0;
     }
 
-    /// @notice Get Takara split (second yield source)
     function splitTakara() external view returns (uint256) {
         return yieldSources.length > 1 ? yieldSources[1].split : 0;
     }
 
-    /// @notice Get Morpho split (third yield source)
     function splitMorpho() external view returns (uint256) {
         return yieldSources.length > 2 ? yieldSources[2].split : 0;
     }
 
-    /// @notice Get Morpho max iterations (third yield source)
     function morphoMaxIterations() external view returns (uint256) {
         return yieldSources.length > 2 ? yieldSources[2].morphoMaxIterations : 0;
     }
 
-    /// @notice Get Yei pool address
     function yeiPool() external view returns (address) {
         return yieldSources.length > 0 ? yieldSources[0].protocolAddress : address(0);
     }
 
-    /// @notice Get aToken address
     function aToken() external view returns (address) {
         return yieldSources.length > 0 ? yieldSources[0].receiptToken : address(0);
     }
 
-    /// @notice Get cToken address
     function cToken() external view returns (address) {
         return yieldSources.length > 1 ? yieldSources[1].protocolAddress : address(0);
     }
 
-    /// @notice Get comptroller address
     function comptroller() external view returns (address) {
         return yieldSources.length > 1 ? yieldSources[1].comptroller : address(0);
     }
 
-    /// @notice Get Morpho address
     function morpho() external view returns (address) {
         return yieldSources.length > 2 ? yieldSources[2].protocolAddress : address(0);
     }
 
-    /// @notice Get Takara reward token
     function takaraRewardToken() external view returns (address) {
         return yieldSources.length > 1 ? yieldSources[1].rewardToken : address(0);
     }
 
-    /// @notice Get Morpho reward token
     function morphoRewardToken() external view returns (address) {
         return yieldSources.length > 2 ? yieldSources[2].rewardToken : address(0);
     }
 
-    /// @notice Get router V2 address (backward compatibility)
     function routerV2() external view returns (address) {
         uint256 len = routers.length;
         for (uint256 i = 0; i < len; i++) {
@@ -1037,7 +1078,6 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
         return address(0);
     }
 
-    /// @notice Get router V3 address (backward compatibility)
     function routerV3() external view returns (address) {
         uint256 len = routers.length;
         for (uint256 i = 0; i < len; i++) {
@@ -1046,94 +1086,5 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             }
         }
         return address(0);
-    }
-
-    /// @notice Get active router type (backward compatibility)
-    function activeRouter() external view returns (RouterType) {
-        if (activeRouterIndex >= routers.length) return RouterType.V2;
-        return routers[activeRouterIndex].routerType;
-    }
-
-    /// @notice Set active router by type (backward compatibility)
-    function setActiveRouter(RouterType _type) external onlyKeeperOrOwner {
-        uint256 len = routers.length;
-        for (uint256 i = 0; i < len; i++) {
-            if (routers[i].routerType == _type && routers[i].enabled) {
-                activeRouterIndex = i;
-                emit ActiveRouterSet(i);
-                return;
-            }
-        }
-    }
-
-    /// @notice Set router V2 address (backward compatibility)
-    function setRouterV2(address _router) external onlyOwner {
-        // Find first V2 router and update, or add new
-        uint256 len = routers.length;
-        for (uint256 i = 0; i < len; i++) {
-            if (routers[i].routerType == RouterType.V2) {
-                routers[i].routerAddress = _router;
-                return;
-            }
-        }
-        // If no V2 router exists, add it
-        if (_router != address(0)) {
-            routers.push(DexRouter({
-                routerAddress: _router,
-                routerType: RouterType.V2,
-                enabled: true,
-                label: "V2 Router"
-            }));
-        }
-    }
-
-    /// @notice Set router V3 address (backward compatibility)
-    function setRouterV3(address _router) external onlyOwner {
-        // Find first V3 router and update, or add new
-        uint256 len = routers.length;
-        for (uint256 i = 0; i < len; i++) {
-            if (routers[i].routerType == RouterType.V3) {
-                routers[i].routerAddress = _router;
-                return;
-            }
-        }
-        // If no V3 router exists, add it
-        if (_router != address(0)) {
-            routers.push(DexRouter({
-                routerAddress: _router,
-                routerType: RouterType.V3,
-                enabled: true,
-                label: "V3 Router"
-            }));
-        }
-    }
-
-    /// @notice Set Takara reward config (backward compatibility)
-    function setTakaraRewardConfig(
-        address _rewardToken,
-        address[] calldata _swapPath
-    ) external onlyOwner {
-        if (yieldSources.length > 1) {
-            yieldSources[1].rewardToken = _rewardToken;
-            yieldSources[1].swapPath = _swapPath;
-        }
-    }
-
-    /// @notice Set Morpho reward config (backward compatibility)
-    function setMorphoRewardConfig(
-        address _rewardToken,
-        address[] calldata _swapPath
-    ) external onlyOwner {
-        if (yieldSources.length > 2) {
-            yieldSources[2].rewardToken = _rewardToken;
-            yieldSources[2].swapPath = _swapPath;
-        }
-    }
-
-    /// @notice Set Morpho max iterations (backward compatibility)
-    function setMorphoMaxIterations(uint256 _maxIterations) external onlyOwner {
-        if (yieldSources.length > 2) {
-            yieldSources[2].morphoMaxIterations = _maxIterations;
-        }
     }
 }

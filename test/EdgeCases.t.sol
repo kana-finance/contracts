@@ -200,7 +200,7 @@ contract EdgeCasesTest is Test {
 
         // Harvest should skip Takara since split=0
         vm.prank(keeper);
-        vault.harvest(0, 0);
+        vault.harvest(new uint256[](3));
 
         // No error means 0-split sources were skipped
     }

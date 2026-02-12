@@ -169,7 +169,7 @@ contract SecurityImprovementsTest is Test {
 
         vm.prank(keeper);
         vm.expectRevert();
-        vault.harvest(0, 0);
+        vault.harvest(new uint256[](3));
     }
 
     function test_vault_paused_blocksSetStrategy() public {
@@ -420,7 +420,7 @@ contract SecurityImprovementsTest is Test {
         // Harvest blocked
         vm.prank(keeper);
         vm.expectRevert();
-        vault.harvest(0, 0);
+        vault.harvest(new uint256[](3));
     }
 
     function test_integration_unpauseBoth_resumesOperations() public {

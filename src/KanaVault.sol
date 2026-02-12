@@ -158,43 +158,6 @@ contract KanaVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
         }
     }
 
-    /// @notice Harvest with legacy signature (backward compatibility)
-    /// @param takaraMinOut Minimum USDC expected from Takara (2nd yield source)
-    /// @param morphoMinOut Minimum USDC expected from Morpho (3rd yield source)
-    function harvest(
-        uint256 takaraMinOut,
-        uint256 morphoMinOut
-    ) external onlyKeeperOrOwner whenNotPaused nonReentrant {
-        if (address(strategy) == address(0)) revert NoStrategy();
-
-        // Convert to array format (assuming 3 yield sources: Yei, Takara, Morpho)
-        uint256[] memory minAmountsOut = new uint256[](3);
-        minAmountsOut[0] = 0; // Yei has no rewards
-        minAmountsOut[1] = takaraMinOut;
-        minAmountsOut[2] = morphoMinOut;
-
-        (bool success, bytes memory data) = address(strategy).call(
-            abi.encodeWithSignature(
-                "harvest(uint256[])",
-                minAmountsOut
-            )
-        );
-        require(success, "Harvest failed");
-        uint256 profit = abi.decode(data, (uint256));
-
-        if (profit > 0) {
-            uint256 fee = (profit * PERFORMANCE_FEE_BPS) / BPS_DENOMINATOR;
-
-            if (fee > 0) {
-                strategy.withdraw(fee);
-                IERC20(asset()).safeTransfer(feeRecipient, fee);
-            }
-
-            totalProfitAccrued += profit;
-            emit Harvest(profit, fee);
-        }
-    }
-
     // ─── ERC4626 Overrides ───────────────────────────────────────────────
 
     /// @notice Total assets = vault balance + strategy balance

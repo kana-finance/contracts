@@ -100,7 +100,7 @@ contract ForkTest is Test {
         vault.deposit(50_000e6, user);
         vm.warp(block.timestamp + 7 days);
 
-        vault.harvest(0, 0);
+        vault.harvest(new uint256[](3));
         console2.log("Vault total assets:", vault.totalAssets() / 1e6, "USDC");
     }
 
@@ -112,7 +112,7 @@ contract ForkTest is Test {
         uint256 shares = vault.deposit(depositAmount, user);
 
         vm.warp(block.timestamp + 14 days);
-        vault.harvest(0, 0);
+        vault.harvest(new uint256[](3));
 
         vm.prank(user);
         vault.deposit(depositAmount, user);

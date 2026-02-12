@@ -652,9 +652,11 @@ contract SlippageProtectionTest is Test {
 
         takaraReward.mint(address(strat), 5000e6);
 
-        // Keeper harvests through vault (using legacy signature)
+        // Keeper harvests through vault
         vm.prank(keeperAddr);
-        kanaVault.harvest(4800e6, 0);
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[1] = 4800e6; // Takara
+        kanaVault.harvest(minAmounts);
     }
 
     function test_vault_harvest_revertsOnBadPrice() public {
@@ -691,7 +693,9 @@ contract SlippageProtectionTest is Test {
         badRouter.setSlippage(2000);
 
         vm.expectRevert("Harvest failed");
-        kanaVault.harvest(4950e6, 0);
+        uint256[] memory minAmounts2 = new uint256[](3);
+        minAmounts2[1] = 4950e6; // Takara
+        kanaVault.harvest(minAmounts2);
     }
 
     // ═══════════════════════════════════════════════════════════════════

@@ -55,7 +55,7 @@ contract TestFlow is Script {
         
         // 5. Harvest yield
         console.log("5. Harvesting yield...");
-        vault.harvest(0, 0);
+        vault.harvest(new uint256[](3));
         console.log("   Total Assets after harvest:", vault.totalAssets() / 1e6, "USDC");
         
         // 6. Check share value

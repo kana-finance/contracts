@@ -169,7 +169,7 @@ contract KanaVaultTest is Test {
         strategy.simulateYield(100e6);
 
         vm.prank(owner);
-        vault.harvest(0, 0);
+        vault.harvest(new uint256[](3));
 
         // 10% fee on 100 USDC = 10 USDC
         assertEq(usdc.balanceOf(feeRecipient), 10e6, "Fee recipient should get 10%");
@@ -181,7 +181,7 @@ contract KanaVaultTest is Test {
         vault.deposit(10_000e6, alice);
 
         vm.prank(owner);
-        vault.harvest(0, 0); // should not revert
+        vault.harvest(new uint256[](3)); // should not revert
 
         assertEq(usdc.balanceOf(feeRecipient), 0);
     }
@@ -191,14 +191,14 @@ contract KanaVaultTest is Test {
         KanaVault emptyVault = new KanaVault(IERC20(address(usdc)), feeRecipient);
 
         vm.expectRevert(KanaVault.NoStrategy.selector);
-        emptyVault.harvest(0, 0);
+        emptyVault.harvest(new uint256[](3));
         vm.stopPrank();
     }
 
     function test_harvest_onlyKeeperOrOwner() public {
         vm.prank(alice);
         vm.expectRevert(KanaVault.NotKeeperOrOwner.selector);
-        vault.harvest(0, 0);
+        vault.harvest(new uint256[](3));
     }
 
     function test_harvest_keeper_can_call() public {
@@ -209,7 +209,7 @@ contract KanaVaultTest is Test {
         strategy.simulateYield(100e6);
 
         vm.prank(keeperAddr);
-        vault.harvest(0, 0);
+        vault.harvest(new uint256[](3));
 
         assertEq(usdc.balanceOf(feeRecipient), 10e6, "Keeper harvest should work");
     }
@@ -243,7 +243,7 @@ contract KanaVaultTest is Test {
 
         vm.prank(keeperAddr);
         vm.expectRevert(KanaVault.NotKeeperOrOwner.selector);
-        vault.harvest(0, 0);
+        vault.harvest(new uint256[](3));
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -349,7 +349,7 @@ contract KanaVaultTest is Test {
 
         // 3. Harvest — 10% fee = 20 USDC
         vm.prank(keeperAddr);
-        vault.harvest(0, 0);
+        vault.harvest(new uint256[](3));
         assertEq(usdc.balanceOf(feeRecipient), 20e6);
 
         // 4. Alice redeems
