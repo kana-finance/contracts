@@ -67,10 +67,10 @@ contract DeployMainnet is Script {
         strategy.setKeeper(deployer);
 
         // 5. First deposit — 10 USDC to prevent inflation attack
-        uint256 seedAmount = 10e6; // 10 USDC
+        uint256 seedAmount = 1e6; // 1 USDC
         IERC20(USDC).approve(address(vault), seedAmount);
         vault.deposit(seedAmount, deployer);
-        console.log("Seed deposit: 10 USDC");
+        console.log("Seed deposit: 1 USDC");
 
         vm.stopBroadcast();
 
