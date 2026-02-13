@@ -291,6 +291,9 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
     /// @inheritdoc IStrategy
     function withdraw(uint256 amount) external override onlyVault whenNotPaused nonReentrant {
         _withdrawFromProtocols(amount);
+        // Transfer actual balance (may be slightly less than requested due to protocol rounding)
+        uint256 actual = usdc.balanceOf(address(this));
+        if (actual < amount) amount = actual;
         usdc.safeTransfer(vault, amount);
         emit Withdrawn(amount);
     }
