@@ -206,6 +206,11 @@ contract KanaVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
             if (toWithdraw > 0) {
                 strategy.withdraw(toWithdraw);
             }
+            // Adjust assets to actual vault balance (handles protocol rounding)
+            uint256 actualBalance = IERC20(asset()).balanceOf(address(this));
+            if (actualBalance < assets) {
+                assets = actualBalance;
+            }
         }
 
         super._withdraw(caller, receiver, _owner, assets, shares);
