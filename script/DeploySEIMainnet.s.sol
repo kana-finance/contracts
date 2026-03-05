@@ -7,15 +7,13 @@ import {SEIStrategy} from "../src/SEIStrategy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract DeploySEIMainnet is Script {
-    // SEI Mainnet Addresses
-    address constant WSEI = 0xE30feDd158A2e3b13e9badaeABaFc5516e95e8C7;
-
-    // TODO: Fill in after on-chain research
-    address constant YEI_POOL         = address(0); // TODO: Yei WSEI pool address
-    address constant YEI_AWSEI        = address(0); // TODO: aWSEI (Yei receipt token)
-    address constant TAKARA_CWSEI     = address(0); // TODO: cWSEI (Takara cToken)
-    address constant TAKARA_COMPTROLLER = address(0); // TODO: Takara Comptroller
-    address constant MORPHO           = address(0); // TODO: Morpho market for WSEI
+    // SEI Mainnet Addresses — all verified on-chain
+    address constant WSEI               = 0xE30feDd158A2e3b13e9badaeABaFc5516e95e8C7;
+    address constant YEI_POOL           = 0x4a4d9abD36F923cBA0Af62A39C01dEC2944fb638; // Yei lending pool (shared across all assets)
+    address constant YEI_AWSEI          = 0x809FF4801aA5bDb33045d1fEC810D082490D63a4; // aWSEI receipt token (slot[8] of getReserveData)
+    address constant TAKARA_CWSEI       = 0xA26b9BFe606d29F16B5Aecf30F9233934452c4E2; // cWSEI (verified via getAllMarkets + underlying())
+    address constant TAKARA_COMPTROLLER = 0x71034bf5eC0FAd7aEE81a213403c8892F3d8CAeE; // real comptroller (from cUSDC.comptroller())
+    address constant FEATHER_WSEI_VAULT = 0x948FcC6b7f68f4830Cd69dB1481a9e1A142A4923; // Feather MetaMorpho WSEI vault (~5.67M WSEI TVL)
 
     // DEX Routers (same as USDC vault)
     address constant DRAGONSWAP_ROUTER = 0xa4cF2F53D1195aDDdE9e4D3aCa54f556895712f2;
@@ -46,16 +44,16 @@ contract DeploySEIMainnet is Script {
             aToken: YEI_AWSEI,
             cToken: TAKARA_CWSEI,
             comptroller: TAKARA_COMPTROLLER,
-            morpho: MORPHO,
+            morpho: FEATHER_WSEI_VAULT,
             routerV2: DRAGONSWAP_ROUTER,
             routerV3: SAILOR_ROUTER
         });
 
         strategy = new SEIStrategy(
             addrs,
-            0,      // 0% Yei (TODO: enable once pool address is confirmed)
-            10000,  // 100% Takara initially (TODO: adjust once cWSEI confirmed)
-            0,      // 0% Morpho (TODO: enable once market confirmed)
+            0,      // 0% Yei (enable by calling setSplits after deployment)
+            10000,  // 100% Takara initially — adjust via setSplits once live
+            0,      // 0% Feather/Morpho (enable by calling setSplits after deployment)
             4,      // Morpho max iterations
             500,    // 5% max slippage cap
             3600,   // 1 hour rebalance cooldown
@@ -85,6 +83,7 @@ contract DeploySEIMainnet is Script {
         console.log("Fee: 10% (constant)");
         console.log("Max Slippage Cap: 5%");
         console.log("Rebalance Cooldown: 1 hour");
-        console.log("Initial Allocation: 100% Takara (pending address confirmation)");
+        console.log("Initial Allocation: 100% Takara, 0% Yei, 0% Feather");
+        console.log("Yield Sources: Yei aWSEI, Takara cWSEI, Feather MetaMorpho WSEI vault");
     }
 }

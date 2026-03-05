@@ -11,7 +11,7 @@ import {IAavePool} from "./interfaces/external/IAavePool.sol";
 import {IAToken} from "./interfaces/external/IAToken.sol";
 import {ICErc20} from "./interfaces/external/ICErc20.sol";
 import {IComptroller} from "./interfaces/external/IComptroller.sol";
-import {IMorpho} from "./interfaces/external/IMorpho.sol";
+import {IMetaMorpho} from "./interfaces/external/IMetaMorpho.sol";
 import {IMerklDistributor} from "./interfaces/external/IMerklDistributor.sol";
 import {ISailorRouter} from "./interfaces/external/ISailorRouter.sol";
 import {ISwapRouterV3} from "./interfaces/external/ISwapRouterV3.sol";
@@ -344,13 +344,8 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                 uint256 err = ICErc20(source.protocolAddress).mint(toSource);
                 if (err != 0) revert MintFailed(err);
             } else if (source.protocolType == ProtocolType.Morpho) {
-                uint256 supplied = IMorpho(source.protocolAddress).supply(
-                    address(wsei),
-                    toSource,
-                    address(this),
-                    source.morphoMaxIterations
-                );
-                if (supplied == 0) revert MorphoSupplyFailed();
+                // Feather vault is a MetaMorpho ERC-4626 vault — use deposit()
+                IMetaMorpho(source.protocolAddress).deposit(toSource, address(this));
             }
         }
     }
@@ -384,13 +379,8 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                 uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(actual);
                 if (err != 0) revert RedeemFailed(err);
             } else if (source.protocolType == ProtocolType.Morpho) {
-                uint256 withdrawn = IMorpho(source.protocolAddress).withdraw(
-                    address(wsei),
-                    actual,
-                    address(this),
-                    source.morphoMaxIterations
-                );
-                if (withdrawn == 0) revert MorphoWithdrawFailed();
+                // MetaMorpho ERC-4626 — withdraw exact assets
+                IMetaMorpho(source.protocolAddress).withdraw(actual, address(this), address(this));
             }
         }
 
@@ -415,13 +405,7 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                     uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(toWithdraw);
                     if (err != 0) revert RedeemFailed(err);
                 } else if (source.protocolType == ProtocolType.Morpho) {
-                    uint256 mWithdrawn = IMorpho(source.protocolAddress).withdraw(
-                        address(wsei),
-                        toWithdraw,
-                        address(this),
-                        source.morphoMaxIterations
-                    );
-                    if (mWithdrawn == 0) revert MorphoWithdrawFailed();
+                    IMetaMorpho(source.protocolAddress).withdraw(toWithdraw, address(this), address(this));
                 }
 
                 balance = wsei.balanceOf(address(this));
@@ -566,7 +550,10 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             uint256 exchangeRate = ICErc20(source.receiptToken).exchangeRateStored();
             return (cTokenBal * exchangeRate) / 1e18;
         } else if (source.protocolType == ProtocolType.Morpho) {
-            return IMorpho(source.protocolAddress).supplyBalance(address(wsei), address(this));
+            // MetaMorpho ERC-4626: convert our share balance to asset value
+            uint256 shares = IMetaMorpho(source.protocolAddress).balanceOf(address(this));
+            if (shares == 0) return 0;
+            return IMetaMorpho(source.protocolAddress).convertToAssets(shares);
         }
         return 0;
     }
@@ -887,13 +874,9 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                 uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(balance);
                 if (err != 0) revert RedeemFailed(err);
             } else if (source.protocolType == ProtocolType.Morpho) {
-                uint256 withdrawn = IMorpho(source.protocolAddress).withdraw(
-                    address(wsei),
-                    balance,
-                    address(this),
-                    source.morphoMaxIterations
-                );
-                if (withdrawn == 0) revert MorphoWithdrawFailed();
+                // MetaMorpho ERC-4626 — redeem all shares
+                uint256 shares = IMetaMorpho(source.protocolAddress).balanceOf(address(this));
+                if (shares > 0) IMetaMorpho(source.protocolAddress).redeem(shares, address(this), address(this));
             }
         }
 
