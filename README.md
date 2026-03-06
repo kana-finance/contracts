@@ -2,64 +2,51 @@
 
 USDC yield aggregator on SEI — simple, auto-compounding, high-yield savings for everyone.
 
-## Overview
-
-Kana automatically allocates USDC deposits to the highest-yielding lending protocol on SEI. Users deposit USDC, receive `kUSDC` shares, and earn yield. All rewards are swapped to USDC and auto-compounded.
-
-Think of it as a **high-yield savings account** — deposit USDC, earn more USDC.
-
 ## Architecture
 
-### Vault (ERC-4626)
-- `KanaVault.sol` — Handles deposits, withdrawals, and fee collection
+### One strategy per asset
+
+Kana follows the **one-strategy-per-asset** pattern. The vault holds user deposits and issues shares. A single strategy handles all protocol allocation internally.
+
+```
+User deposits USDC → KanaVault (ERC-4626, kUSDC shares, fees)
+                        → USDCStrategy (splits across protocols)
+                             → Yei Finance (Aave V3 fork)
+                             → Takara (Compound fork)
+                             → Morpho (P2P optimizer)
+```
+
+### Vault
+- `KanaVault.sol` — ERC-4626 vault, handles deposits/withdrawals/fees
 - Users deposit USDC → receive kUSDC shares
-- Share price grows as yield accrues
 - 10% performance fee on harvested yield
 
-### Strategies
-Each strategy manages USDC in one lending protocol:
-- `YeiStrategy.sol` — Yei Finance (Aave V3 fork)
-- `TakaraStrategy.sol` — Takara (Compound fork)
-- `MorphoStrategy.sol` — Morpho Protocol
+### Strategy
+- `USDCStrategy.sol` — manages USDC across all three lending protocols
+- Configurable allocation splits (basis points, must sum to 10000)
+- Internal rebalancing between protocols
+- Reward harvesting + swap to USDC via Sailor DEX
 
-### Flow
-```
-User deposits USDC → Vault → Active Strategy → Lending Protocol
-                                    ↓
-                              Yield accrues
-                                    ↓
-Keeper harvests → Swap rewards → Compound → Share price grows
-```
-
-## Yield Sources
-| Protocol | Type | How it works |
-|----------|------|--------------|
-| Yei Finance | Aave V3 fork | Supply USDC → aUSDC, interest accrues via balance growth |
-| Takara | Compound fork | Mint cUSDC, interest accrues via exchange rate growth |
-| Morpho | P2P optimizer | Matches lenders/borrowers P2P for better rates |
+### Yield Sources
+| Protocol | Type | Mechanism |
+|----------|------|-----------|
+| Yei Finance | Aave V3 fork | aToken balance growth |
+| Takara | Compound fork | cToken exchange rate growth + COMP rewards |
+| Morpho | P2P optimizer | Better rates via lender/borrower matching |
 
 ## Development
 
-### Build
 ```bash
-forge build
-```
+# Install dependencies
+forge install OpenZeppelin/openzeppelin-contracts
+forge install foundry-rs/forge-std
 
-### Test
-```bash
+# Build
+forge build
+
+# Test
 forge test -v
 ```
-
-### Format
-```bash
-forge fmt
-```
-
-## Tech Stack
-- **Solidity** 0.8.20+
-- **Foundry** (Forge, Cast, Anvil)
-- **OpenZeppelin** Contracts v5
-- **SEI** EVM
 
 ## License
 MIT
