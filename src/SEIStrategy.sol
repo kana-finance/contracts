@@ -299,18 +299,10 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @inheritdoc IStrategy
-    /// @dev Interface compatibility — calls harvest with empty minAmounts (no slippage protection)
-    function harvest() external override onlyVault whenNotPaused nonReentrant returns (uint256 profit) {
-        uint256[] memory minAmounts = new uint256[](yieldSources.length);
-        profit = _harvestAll(minAmounts);
-        emit Harvested(profit);
-    }
-
-    /// @notice Harvest with slippage protection
     /// @param minAmountsOut Minimum WSEI expected from each yield source's reward swap
     function harvest(
         uint256[] calldata minAmountsOut
-    ) external onlyVault whenNotPaused nonReentrant returns (uint256 profit) {
+    ) external override onlyVault whenNotPaused nonReentrant returns (uint256 profit) {
         if (minAmountsOut.length != yieldSources.length) revert InvalidMinAmountsLength();
         profit = _harvestAll(minAmountsOut);
         emit Harvested(profit);

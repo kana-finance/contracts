@@ -14,8 +14,9 @@ interface IStrategy {
     function withdraw(uint256 amount) external;
 
     /// @notice Harvest rewards from all protocols, swap to asset, compound
+    /// @param minAmountsOut Minimum asset expected from each reward token swap
     /// @return profit The amount of asset profit generated
-    function harvest() external returns (uint256 profit);
+    function harvest(uint256[] calldata minAmountsOut) external returns (uint256 profit);
 
     /// @notice Total asset value managed by this strategy across all protocols
     function balanceOf() external view returns (uint256);

@@ -692,7 +692,7 @@ contract SlippageProtectionTest is Test {
         takaraReward.mint(address(strat), 5000e6);
         badRouter.setSlippage(2000);
 
-        vm.expectRevert("Harvest failed");
+        vm.expectRevert("INSUFFICIENT_OUTPUT_AMOUNT");
         uint256[] memory minAmounts2 = new uint256[](3);
         minAmounts2[1] = 4950e6; // Takara
         kanaVault.harvest(minAmounts2);

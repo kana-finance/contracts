@@ -64,6 +64,7 @@ contract SEIVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
     error FeeRecipientIsLocked();
     error NotKeeperOrOwner();
     error NotGuardianOrOwner();
+    error InsufficientWithdrawBalance(uint256 requested, uint256 available);
 
     // ─── Modifiers ───────────────────────────────────────────────────────
 
@@ -104,11 +105,10 @@ contract SEIVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
         IStrategy oldStrategy = strategy;
         address oldStrategyAddr = address(oldStrategy);
 
-        // Update state BEFORE external calls (checks-effects-interactions)
+        // Update strategy reference
         strategy = _strategy;
-        SafeERC20.forceApprove(IERC20(asset()), address(_strategy), type(uint256).max);
 
-        // If there's an existing strategy with funds, withdraw everything first
+        // Withdraw from old strategy FIRST, then revoke its approval (H-2 fix)
         if (oldStrategyAddr != address(0)) {
             uint256 bal = oldStrategy.balanceOf();
             if (bal > 0) {
@@ -116,6 +116,9 @@ contract SEIVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
             }
             SafeERC20.forceApprove(IERC20(asset()), oldStrategyAddr, 0);
         }
+
+        // THEN approve new strategy (after old strategy funds are recovered)
+        SafeERC20.forceApprove(IERC20(asset()), address(_strategy), type(uint256).max);
 
         // Deploy idle funds to new strategy
         uint256 idle = IERC20(asset()).balanceOf(address(this));
@@ -136,14 +139,7 @@ contract SEIVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
     ) external onlyKeeperOrOwner whenNotPaused nonReentrant {
         if (address(strategy) == address(0)) revert NoStrategy();
 
-        (bool success, bytes memory data) = address(strategy).call(
-            abi.encodeWithSignature(
-                "harvest(uint256[])",
-                minAmountsOut
-            )
-        );
-        require(success, "Harvest failed");
-        uint256 profit = abi.decode(data, (uint256));
+        uint256 profit = strategy.harvest(minAmountsOut);
 
         if (profit > 0) {
             uint256 fee = (profit * PERFORMANCE_FEE_BPS) / BPS_DENOMINATOR;
@@ -206,10 +202,10 @@ contract SEIVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
             if (toWithdraw > 0) {
                 strategy.withdraw(toWithdraw);
             }
-            // Adjust assets to actual vault balance (handles protocol rounding)
+            // Revert if strategy returned less than requested (H-1 fix)
             uint256 actualBalance = IERC20(asset()).balanceOf(address(this));
             if (actualBalance < assets) {
-                assets = actualBalance;
+                revert InsufficientWithdrawBalance(assets, actualBalance);
             }
         }
 

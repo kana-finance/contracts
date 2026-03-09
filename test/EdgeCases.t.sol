@@ -30,12 +30,14 @@ contract EdgeCasesTest is Test {
     address public feeRecipient;
     address public keeper;
     address public alice;
+    address public bob;
 
     function setUp() public {
         owner = address(this);
         feeRecipient = makeAddr("feeRecipient");
         keeper = makeAddr("keeper");
         alice = makeAddr("alice");
+        bob = makeAddr("bob");
 
         usdc = new MockERC20("USD Coin", "USDC", 6);
         rewardToken = new MockERC20("Reward", "RWD", 18);
@@ -426,7 +428,30 @@ contract EdgeCasesTest is Test {
         assertApproxEqRel(vault.totalAssets(), 10_000e6 - 1, 0.01e18);
     }
 
-    address bob = makeAddr("bob");
+    // ─── H-1: InsufficientWithdrawBalance ────────────────────────────────
+
+    /// @notice H-1: Strategy that returns 1 less than requested must cause redeem to revert
+    function test_H1_withdrawRevertsWhenStrategyShortchanges() public {
+        // Deploy a strategy that shortchanges by 1 wei
+        ShortchangingStrategy shortStrat = new ShortchangingStrategy(address(usdc));
+        usdc.mint(address(shortStrat), 1_000_000e6);
+
+        vm.prank(owner);
+        vault.setStrategy(IStrategy(address(shortStrat)));
+
+        // Alice deposits
+        usdc.mint(alice, 10_000e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.deposit(10_000e6, alice);
+
+        // Redeem should revert because strategy returns 1 less than requested
+        uint256 shares = vault.balanceOf(alice);
+        vm.expectRevert();
+        vault.redeem(shares, alice, alice);
+        vm.stopPrank();
+    }
+
 }
 
 /// @notice Mock that always reverts
@@ -445,3 +470,27 @@ contract RevertingMorpho {
 }
 
 // Reentrancy protection is inherent in ERC4626 due to no callbacks
+
+/// @notice Mock strategy that returns 1 less than requested (simulates protocol rounding shortchange)
+contract ShortchangingStrategy is IStrategy {
+    using SafeERC20 for IERC20;
+    IERC20 public want;
+    uint256 public totalDeposited;
+
+    constructor(address _want) { want = IERC20(_want); }
+
+    function deposit(uint256 amount) external override { totalDeposited += amount; }
+
+    function withdraw(uint256 amount) external override {
+        // Shortchange by 1 wei — send less than requested
+        uint256 actual = amount > 0 ? amount - 1 : 0;
+        totalDeposited -= actual;
+        want.safeTransfer(msg.sender, actual);
+    }
+
+    function harvest(uint256[] calldata) external override returns (uint256) { return 0; }
+
+    function balanceOf() external view override returns (uint256) { return totalDeposited; }
+
+    function asset() external view override returns (address) { return address(want); }
+}

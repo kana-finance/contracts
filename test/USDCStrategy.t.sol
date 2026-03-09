@@ -274,7 +274,7 @@ contract USDCStrategyTest is Test {
         vm.warp(block.timestamp + 30 days);
         
         vm.prank(vault);
-        uint256 profit = strategy.harvest();
+        uint256 profit = strategy.harvest(new uint256[](3));
         
         // Harvest completes without error (profit depends on mock behavior)
         // Mocks may or may not generate profit
@@ -298,12 +298,12 @@ contract USDCStrategyTest is Test {
         
         // Harvest should complete without error
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
     
     function test_harvest_onlyVault() public {
         vm.expectRevert(USDCStrategy.OnlyVault.selector);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
     
     // ─── Balance Tests ───────────────────────────────────────────────────
@@ -583,7 +583,7 @@ contract USDCStrategyTest is Test {
         
         // Harvest - should swap reward tokens to USDC
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
     
     function test_harvest_withMorphoSwap() public {
@@ -608,7 +608,7 @@ contract USDCStrategyTest is Test {
         strategy.deposit(amount);
         
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
     
     function test_harvest_noRouter() public {
@@ -633,7 +633,7 @@ contract USDCStrategyTest is Test {
         
         // Should not revert even with no router
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
     
     function test_harvest_zeroRewardBalance() public {
@@ -651,7 +651,7 @@ contract USDCStrategyTest is Test {
         
         // Harvest with 0 reward balance
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
     
     function test_harvest_shortSwapPath() public {
@@ -670,7 +670,7 @@ contract USDCStrategyTest is Test {
         
         // Should not swap with short path
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
     
     // ─── Withdraw Edge Cases ─────────────────────────────────────────────

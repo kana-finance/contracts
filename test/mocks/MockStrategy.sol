@@ -28,25 +28,7 @@ contract MockStrategy is IStrategy {
         want.safeTransfer(msg.sender, amount);
     }
 
-    function harvest() external override returns (uint256 profit) {
-        profit = pendingYield;
-        if (profit > 0) {
-            totalDeposited += profit;
-            pendingYield = 0;
-        }
-    }
-
-    /// @notice Harvest with slippage protection (for vault integration) - legacy signature
-    function harvest(uint256, uint256) external returns (uint256 profit) {
-        profit = pendingYield;
-        if (profit > 0) {
-            totalDeposited += profit;
-            pendingYield = 0;
-        }
-    }
-
-    /// @notice Harvest with dynamic slippage array (new signature)
-    function harvest(uint256[] calldata) external returns (uint256 profit) {
+    function harvest(uint256[] calldata) external override returns (uint256 profit) {
         profit = pendingYield;
         if (profit > 0) {
             totalDeposited += profit;
