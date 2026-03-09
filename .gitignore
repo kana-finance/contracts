@@ -5,3 +5,4 @@ broadcast/
 lcov.info
 node_modules/
 .env
+.worktrees/
