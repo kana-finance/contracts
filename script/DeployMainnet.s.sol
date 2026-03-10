@@ -23,9 +23,11 @@ contract DeployMainnet is Script {
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
+        address guardian = vm.envAddress("GUARDIAN_ADDRESS");
 
         console.log("=== KANA MAINNET DEPLOYMENT ===");
         console.log("Deployer:", deployer);
+        console.log("Guardian:", guardian);
         require(block.chainid == 1329, "Not on SEI mainnet!");
 
         vm.startBroadcast(deployerPrivateKey);
@@ -66,7 +68,11 @@ contract DeployMainnet is Script {
         vault.setKeeper(deployer);
         strategy.setKeeper(deployer);
 
-        // 5. First deposit — 10 USDC to prevent inflation attack
+        // 5. Set guardian (pause-only role)
+        vault.setGuardian(guardian);
+        strategy.setGuardian(guardian);
+
+        // 6. First deposit — 1 USDC to seed the vault and prevent inflation attack
         uint256 seedAmount = 1e6; // 1 USDC
         IERC20(USDC).approve(address(vault), seedAmount);
         vault.deposit(seedAmount, deployer);
@@ -74,13 +80,29 @@ contract DeployMainnet is Script {
 
         vm.stopBroadcast();
 
+        // ─── Post-Deploy Verification ───────────────────────────────────────────
+        require(address(vault.strategy()) == address(strategy), "VERIFY: vault.strategy mismatch");
+        require(vault.keeper() == deployer, "VERIFY: vault.keeper mismatch");
+        require(vault.guardian() == guardian, "VERIFY: vault.guardian mismatch");
+        require(strategy.vault() == address(vault), "VERIFY: strategy.vault mismatch");
+        require(strategy.keeper() == deployer, "VERIFY: strategy.keeper mismatch");
+        require(strategy.guardian() == guardian, "VERIFY: strategy.guardian mismatch");
+        console.log("All post-deploy assertions passed.");
+
         console.log("");
         console.log("=== DEPLOYMENT COMPLETE ===");
         console.log("Vault:", address(vault));
         console.log("Strategy:", address(strategy));
+        console.log("Guardian:", guardian);
         console.log("Fee: 10% (constant)");
         console.log("Max Slippage Cap: 5%");
         console.log("Rebalance Cooldown: 1 hour");
         console.log("Initial Allocation: 100% Takara");
+        console.log("");
+        console.log("NEXT STEPS:");
+        console.log("  1. Transfer ownership of all 4 contracts to multisig");
+        console.log("  2. Call setMerklDistributor once Morpho Merkl address is known");
+        console.log("  3. Update keeper address to dedicated bot wallet");
+        console.log("  See script/DEPLOY_RUNBOOK.md for full post-deploy checklist");
     }
 }
