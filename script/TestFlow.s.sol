@@ -54,6 +54,9 @@ contract TestFlow is Script {
         vm.startBroadcast(pk);
         
         // 5. Harvest yield
+        // minAmountsOut is zeros here because the testnet mock protocols don't produce
+        // reward tokens, so there are no swaps to protect. On mainnet with reward tokens
+        // configured, pass non-zero values to enforce slippage limits.
         console.log("5. Harvesting yield...");
         vault.harvest(new uint256[](3));
         console.log("   Total Assets after harvest:", vault.totalAssets() / 1e6, "USDC");
