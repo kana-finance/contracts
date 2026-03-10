@@ -822,6 +822,7 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Update first 3 yield source splits at once (helper for backward compatibility)
     function setSplits(uint256 _splitYei, uint256 _splitTakara, uint256 _splitMorpho) external onlyKeeperOrOwner whenNotPaused {
+        if (yieldSources.length > 3) revert TooManyYieldSources();
         if (_splitYei + _splitTakara + _splitMorpho != SPLIT_TOTAL) revert InvalidSplit();
         if (lastSplitsTime > 0 && block.timestamp < lastSplitsTime + splitsCooldown) {
             revert SplitsCooldownActive(lastSplitsTime + splitsCooldown);
@@ -907,6 +908,7 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             for (uint256 j = 0; j < sourcesLen; j++) {
                 if (yieldSources[j].rewardToken == tokens[i] && yieldSources[j].swapPath.length >= 2) {
                     uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
+                    _validateSlippage(bal, minOut);
                     _swapDynamic(tokens[i], bal, yieldSources[j].swapPath, minOut);
                     break;
                 }

@@ -8,6 +8,8 @@ import {USDCStrategy} from "../src/USDCStrategy.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {MockAToken, MockYeiPool, MockCToken, MockComptroller, MockMorpho, MockRouter} from "../src/mocks/MockLendingProtocols.sol";
+import {IMerklDistributor} from "../src/interfaces/external/IMerklDistributor.sol";
+import {IStrategy} from "../src/interfaces/IStrategy.sol";
 
 /// @title SecurityImprovementsTest
 /// @notice Comprehensive tests for Pausable + Guardian + rescueToken improvements
@@ -441,5 +443,121 @@ contract SecurityImprovementsTest is Test {
         vm.prank(alice);
         vault.withdraw(2000e6, alice, alice);
         assertApproxEqAbs(vault.totalAssets(), 3000e6, 1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // AUDIT FIX TESTS
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// @notice H-2: After setStrategy, old strategy approval is revoked and new strategy is approved
+    function test_H2_setStrategy_approvesNewAfterWithdrawingFromOld() public {
+        // Fund alice and deposit
+        vm.prank(alice);
+        vault.deposit(10_000e6, alice);
+        assertGt(strategy.balanceOf(), 0);
+
+        // Deploy new strategy
+        USDCStrategy.ProtocolAddresses memory addrs = USDCStrategy.ProtocolAddresses({
+            usdc: address(usdc),
+            vault: address(vault),
+            yeiPool: address(yeiPool),
+            aToken: address(aToken),
+            cToken: address(cToken),
+            comptroller: address(comptroller),
+            morpho: address(morpho),
+            routerV2: address(router),
+            routerV3: address(0)
+        });
+        USDCStrategy newStrategy = new USDCStrategy(addrs, 3334, 3333, 3333, 4, 500, 3600, 3600);
+
+        vault.setStrategy(newStrategy);
+
+        // Old strategy should have zero approval
+        assertEq(IERC20(address(usdc)).allowance(address(vault), address(strategy)), 0);
+        // New strategy should have max approval
+        assertEq(IERC20(address(usdc)).allowance(address(vault), address(newStrategy)), type(uint256).max);
+        // Funds migrated to new strategy
+        assertGt(newStrategy.balanceOf(), 0);
+    }
+
+    /// @notice M-4: setSplits reverts when more than 3 yield sources exist
+    function test_M4_setSplits_revertsWithMoreThan3Sources() public {
+        // Use a fresh protocol address so safeIncreaseAllowance doesn't overflow
+        MockYeiPool extraPool = new MockYeiPool();
+        MockAToken extraAToken = new MockAToken(address(usdc), "aExtra", "aExtra");
+
+        address[] memory emptyPath = new address[](0);
+        strategy.addYieldSource(
+            USDCStrategy.ProtocolType.Aave,
+            false,   // disabled
+            0,       // split = 0, total remains 10000
+            address(extraPool),
+            address(extraAToken),
+            address(0),
+            address(0),
+            emptyPath,
+            0
+        );
+
+        // setSplits should now revert because yieldSources.length == 4 > 3
+        vm.expectRevert(USDCStrategy.TooManyYieldSources.selector);
+        vm.prank(keeper);
+        strategy.setSplits(5000, 3000, 2000);
+    }
+
+    /// @notice L-4: claimMorphoRewards with minAmountsOut = [0] reverts due to slippage validation
+    function test_L4_claimMorphoRewards_revertsOnZeroMinAmount() public {
+        // Set up reward token
+        MockERC20 rewardToken = new MockERC20("Reward", "RWD", 18);
+        address[] memory swapPath = new address[](2);
+        swapPath[0] = address(rewardToken);
+        swapPath[1] = address(usdc);
+
+        // Configure yield source[2] (morpho) with a reward token and swap path
+        strategy.setYieldSourceRewardConfig(2, address(rewardToken), swapPath);
+
+        // Set up a mock merkl distributor that transfers reward tokens when claimed
+        SimpleMockMerkl merkl = new SimpleMockMerkl(rewardToken);
+        strategy.setMerklDistributor(address(merkl));
+        rewardToken.mint(address(merkl), 1000e18);
+
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(rewardToken);
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 1000e18;
+        bytes32[][] memory proofs = new bytes32[][](1);
+        proofs[0] = new bytes32[](0);
+
+        // minAmountsOut = [0] should revert: _validateSlippage(1000e18, 0) with maxSlippageBps=500
+        uint256[] memory minAmountsOut = new uint256[](1);
+        minAmountsOut[0] = 0;
+
+        vm.expectRevert(abi.encodeWithSelector(
+            USDCStrategy.SlippageExceedsCap.selector,
+            0,
+            (1000e18 * (10000 - 500)) / 10000
+        ));
+        vm.prank(keeper);
+        strategy.claimMorphoRewards(tokens, amounts, proofs, minAmountsOut);
+    }
+}
+
+/// @notice Minimal merkl distributor mock: just transfers claimed amounts
+contract SimpleMockMerkl is IMerklDistributor {
+    IERC20 private rewardToken;
+
+    constructor(IERC20 _token) { rewardToken = _token; }
+
+    function claim(
+        address user,
+        address[] calldata tokens,
+        uint256[] calldata amounts,
+        bytes32[][] calldata
+    ) external override {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (tokens[i] == address(rewardToken)) {
+                rewardToken.transfer(user, amounts[i]);
+            }
+        }
     }
 }

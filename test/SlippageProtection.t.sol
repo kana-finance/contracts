@@ -364,7 +364,8 @@ contract SlippageProtectionTest is Test {
         assertGe(strategy.balanceOf(), balBefore);
     }
 
-    function test_claimMorphoRewards_emptyMinAmountsDefaultsToZero() public {
+    /// @notice L-4 fix: empty minAmountsOut defaults to 0 which now reverts (slippage validation)
+    function test_claimMorphoRewards_emptyMinAmountsRevertsWithSlippageCap() public {
         _deposit(100_000e6);
         merklDistributor.setClaimAmount(address(morphoReward), 1000e6);
 
@@ -374,9 +375,10 @@ contract SlippageProtectionTest is Test {
         amounts[0] = 1000e6;
         bytes32[][] memory proofs = new bytes32[][](1);
         proofs[0] = new bytes32[](0);
-        uint256[] memory minOuts = new uint256[](0);
+        uint256[] memory minOuts = new uint256[](0); // defaults to 0, now rejected
 
         vm.prank(keeperAddr);
+        vm.expectRevert(); // SlippageExceedsCap — keeper cannot bypass slippage protection
         strategy.claimMorphoRewards(tokens, amounts, proofs, minOuts);
     }
 
