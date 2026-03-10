@@ -273,7 +273,7 @@ contract SEIStrategyTest is Test {
         vm.warp(block.timestamp + 30 days);
 
         vm.prank(vault);
-        uint256 profit = strategy.harvest();
+        uint256 profit = strategy.harvest(new uint256[](3));
 
         assertGe(profit, 0);
     }
@@ -293,12 +293,12 @@ contract SEIStrategyTest is Test {
 
         // Harvest should complete without error
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
 
     function test_harvest_onlyVault() public {
         vm.expectRevert(SEIStrategy.OnlyVault.selector);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
 
     // ─── Balance Tests ───────────────────────────────────────────────────

@@ -299,18 +299,10 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @inheritdoc IStrategy
-    /// @dev Interface compatibility — calls harvest with empty minAmounts (no slippage protection)
-    function harvest() external override onlyVault whenNotPaused nonReentrant returns (uint256 profit) {
-        uint256[] memory minAmounts = new uint256[](yieldSources.length);
-        profit = _harvestAll(minAmounts);
-        emit Harvested(profit);
-    }
-
-    /// @notice Harvest with slippage protection
     /// @param minAmountsOut Minimum WSEI expected from each yield source's reward swap
     function harvest(
         uint256[] calldata minAmountsOut
-    ) external onlyVault whenNotPaused nonReentrant returns (uint256 profit) {
+    ) external override onlyVault whenNotPaused nonReentrant returns (uint256 profit) {
         if (minAmountsOut.length != yieldSources.length) revert InvalidMinAmountsLength();
         profit = _harvestAll(minAmountsOut);
         emit Harvested(profit);
@@ -435,8 +427,8 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             if (source.rewardToken != address(0) && source.swapPath.length >= 2) {
                 uint256 rewardBal = IERC20(source.rewardToken).balanceOf(address(this));
                 if (rewardBal > 0) {
-                    uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
-                    if (minOut > 0) _validateSlippage(rewardBal, minOut);
+                    uint256 minOut = minAmountsOut[i];
+                    _validateSlippage(rewardBal, minOut);
                     _swap(source.rewardToken, rewardBal, source.swapPath, minOut);
                 }
             }
@@ -830,6 +822,7 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Update first 3 yield source splits at once (helper for backward compatibility)
     function setSplits(uint256 _splitYei, uint256 _splitTakara, uint256 _splitMorpho) external onlyKeeperOrOwner whenNotPaused {
+        if (yieldSources.length > 3) revert TooManyYieldSources();
         if (_splitYei + _splitTakara + _splitMorpho != SPLIT_TOTAL) revert InvalidSplit();
         if (lastSplitsTime > 0 && block.timestamp < lastSplitsTime + splitsCooldown) {
             revert SplitsCooldownActive(lastSplitsTime + splitsCooldown);
@@ -915,6 +908,7 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             for (uint256 j = 0; j < sourcesLen; j++) {
                 if (yieldSources[j].rewardToken == tokens[i] && yieldSources[j].swapPath.length >= 2) {
                     uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
+                    _validateSlippage(bal, minOut);
                     _swapDynamic(tokens[i], bal, yieldSources[j].swapPath, minOut);
                     break;
                 }

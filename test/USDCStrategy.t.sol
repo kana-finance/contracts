@@ -274,7 +274,7 @@ contract USDCStrategyTest is Test {
         vm.warp(block.timestamp + 30 days);
         
         vm.prank(vault);
-        uint256 profit = strategy.harvest();
+        uint256 profit = strategy.harvest(new uint256[](3));
         
         // Harvest completes without error (profit depends on mock behavior)
         // Mocks may or may not generate profit
@@ -298,12 +298,12 @@ contract USDCStrategyTest is Test {
         
         // Harvest should complete without error
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
     
     function test_harvest_onlyVault() public {
         vm.expectRevert(USDCStrategy.OnlyVault.selector);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
     
     // ─── Balance Tests ───────────────────────────────────────────────────
@@ -581,11 +581,13 @@ contract USDCStrategyTest is Test {
         vm.prank(vault);
         strategy.deposit(amount);
         
-        // Harvest - should swap reward tokens to USDC
+        // Harvest - should swap reward tokens to USDC (minOut[1] = 950e6 for Takara, 5% max slippage)
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[1] = 950e6; // Takara: 1000e6 * 9500 / 10000
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(minAmounts);
     }
-    
+
     function test_harvest_withMorphoSwap() public {
         // Setup Morpho reward config
         address[] memory morphoPath = new address[](2);
@@ -607,10 +609,13 @@ contract USDCStrategyTest is Test {
         vm.prank(vault);
         strategy.deposit(amount);
         
+        // minOut[2] = 475e6 for Morpho: 500e6 * 9500 / 10000
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[2] = 475e6;
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(minAmounts);
     }
-    
+
     function test_harvest_noRouter() public {
         // Set router to zero to test no-op swap path
         strategy.setRouterV2(address(0));
@@ -631,9 +636,11 @@ contract USDCStrategyTest is Test {
         vm.prank(vault);
         strategy.deposit(amount);
         
-        // Should not revert even with no router
+        // Must provide valid minOut even with no router; swap silently no-ops
+        uint256[] memory minAmounts = new uint256[](3);
+        minAmounts[1] = 95e18; // Takara: 100e18 * 9500 / 10000
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(minAmounts);
     }
     
     function test_harvest_zeroRewardBalance() public {
@@ -651,7 +658,7 @@ contract USDCStrategyTest is Test {
         
         // Harvest with 0 reward balance
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
     
     function test_harvest_shortSwapPath() public {
@@ -670,7 +677,7 @@ contract USDCStrategyTest is Test {
         
         // Should not swap with short path
         vm.prank(vault);
-        strategy.harvest();
+        strategy.harvest(new uint256[](3));
     }
     
     // ─── Withdraw Edge Cases ─────────────────────────────────────────────

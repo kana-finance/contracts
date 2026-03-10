@@ -223,13 +223,19 @@ contract SlippageProtectionTest is Test {
         strategy.harvest(minAmounts);
     }
 
-    function test_harvest_zeroMins() public {
+    function test_harvest_zeroMins_revertsWithSlippageCap() public {
+        // Zero minAmounts now always revert when there are rewards to swap (slippage enforcement)
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 1000e6);
 
         uint256[] memory minAmounts = new uint256[](3);
 
         vm.prank(vault);
+        vm.expectRevert(abi.encodeWithSelector(
+            USDCStrategy.SlippageExceedsCap.selector,
+            0,
+            950e6
+        ));
         strategy.harvest(minAmounts);
     }
 
@@ -364,7 +370,8 @@ contract SlippageProtectionTest is Test {
         assertGe(strategy.balanceOf(), balBefore);
     }
 
-    function test_claimMorphoRewards_emptyMinAmountsDefaultsToZero() public {
+    /// @notice L-4 fix: empty minAmountsOut defaults to 0 which now reverts (slippage validation)
+    function test_claimMorphoRewards_emptyMinAmountsRevertsWithSlippageCap() public {
         _deposit(100_000e6);
         merklDistributor.setClaimAmount(address(morphoReward), 1000e6);
 
@@ -374,9 +381,10 @@ contract SlippageProtectionTest is Test {
         amounts[0] = 1000e6;
         bytes32[][] memory proofs = new bytes32[][](1);
         proofs[0] = new bytes32[](0);
-        uint256[] memory minOuts = new uint256[](0);
+        uint256[] memory minOuts = new uint256[](0); // defaults to 0, now rejected
 
         vm.prank(keeperAddr);
+        vm.expectRevert(); // SlippageExceedsCap — keeper cannot bypass slippage protection
         strategy.claimMorphoRewards(tokens, amounts, proofs, minOuts);
     }
 
@@ -571,15 +579,20 @@ contract SlippageProtectionTest is Test {
         strategy.harvest(minAmounts);
     }
 
-    function test_slippageCap_zeroMinSkipsValidation() public {
-        // minAmountOut = 0 skips the cap check (no slippage protection requested)
+    function test_slippageCap_zeroMinAlwaysReverts() public {
+        // Zero minAmountOut is never valid when rewards exist — always reverts with SlippageExceedsCap
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 1000e6);
 
         uint256[] memory minAmounts = new uint256[](3);
 
         vm.prank(vault);
-        strategy.harvest(minAmounts); // should not revert
+        vm.expectRevert(abi.encodeWithSelector(
+            USDCStrategy.SlippageExceedsCap.selector,
+            0,
+            950e6
+        ));
+        strategy.harvest(minAmounts);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -692,7 +705,7 @@ contract SlippageProtectionTest is Test {
         takaraReward.mint(address(strat), 5000e6);
         badRouter.setSlippage(2000);
 
-        vm.expectRevert("Harvest failed");
+        vm.expectRevert("INSUFFICIENT_OUTPUT_AMOUNT");
         uint256[] memory minAmounts2 = new uint256[](3);
         minAmounts2[1] = 4950e6; // Takara
         kanaVault.harvest(minAmounts2);
