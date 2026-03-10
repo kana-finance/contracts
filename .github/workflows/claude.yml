@@ -1,44 +1,50 @@
-name: Claude Code Review
+name: Claude Code
 
 on:
-  pull_request:
-    types: [opened, synchronize]
   issue_comment:
     types: [created]
   pull_request_review_comment:
     types: [created]
-
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
 
 jobs:
-  review:
+  claude:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
-    # Skip bot comments to avoid loops
-    if: ${{ github.event_name == 'pull_request' || !contains(github.event.comment.user.login, '[bot]') }}
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+      actions: read # Required for Claude to read CI results on PRs
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: anthropics/claude-code-action@v1
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Auto-review every PR; also respond to @claude mentions in comments
-          prompt: |
-            Review this pull request for the Kana Finance yield aggregator contracts (Solidity/Foundry).
+          fetch-depth: 1
 
-            Focus on:
-            1. **Security** — reentrancy, access control, integer overflow/underflow, approval handling, CEI pattern violations, unchecked return values
-            2. **ERC-4626 compliance** — correct share/asset accounting, virtual offset usage, rounding direction
-            3. **Strategy interface** — correct IStrategy implementation, harvest(uint256[]) signature, balanceOf accuracy
-            4. **Slippage protection** — minAmountsOut validated before swaps, maxSlippageBps ceiling respected
-            5. **Invariants** — BPS splits sum to 10000, no more than 3 yield sources, cooldown timers enforced
-            6. **Test coverage** — new functionality has corresponding tests in test/; edge cases and failure paths covered
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
-            Post specific inline comments on the relevant lines. Flag any High or Medium severity issues clearly.
-          claude_args: "--max-turns 5"
+          # This is an optional setting that allows Claude to read CI results on PRs
+          additional_permissions: |
+            actions: read
 
-concurrency:
-  group: claude-review-${{ github.ref }}
-  cancel-in-progress: true
+          # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
+          # prompt: 'Update the pull request description to include a summary of changes.'
+
+          # Optional: Add claude_args to customize behavior and configuration
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
+          # claude_args: '--allowed-tools Bash(gh pr:*)'
+
