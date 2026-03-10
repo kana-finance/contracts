@@ -223,13 +223,19 @@ contract SlippageProtectionTest is Test {
         strategy.harvest(minAmounts);
     }
 
-    function test_harvest_zeroMins() public {
+    function test_harvest_zeroMins_revertsWithSlippageCap() public {
+        // Zero minAmounts now always revert when there are rewards to swap (slippage enforcement)
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 1000e6);
 
         uint256[] memory minAmounts = new uint256[](3);
 
         vm.prank(vault);
+        vm.expectRevert(abi.encodeWithSelector(
+            USDCStrategy.SlippageExceedsCap.selector,
+            0,
+            950e6
+        ));
         strategy.harvest(minAmounts);
     }
 
@@ -573,15 +579,20 @@ contract SlippageProtectionTest is Test {
         strategy.harvest(minAmounts);
     }
 
-    function test_slippageCap_zeroMinSkipsValidation() public {
-        // minAmountOut = 0 skips the cap check (no slippage protection requested)
+    function test_slippageCap_zeroMinAlwaysReverts() public {
+        // Zero minAmountOut is never valid when rewards exist — always reverts with SlippageExceedsCap
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 1000e6);
 
         uint256[] memory minAmounts = new uint256[](3);
 
         vm.prank(vault);
-        strategy.harvest(minAmounts); // should not revert
+        vm.expectRevert(abi.encodeWithSelector(
+            USDCStrategy.SlippageExceedsCap.selector,
+            0,
+            950e6
+        ));
+        strategy.harvest(minAmounts);
     }
 
     // ═══════════════════════════════════════════════════════════════════

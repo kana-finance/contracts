@@ -447,7 +447,7 @@ contract EdgeCasesTest is Test {
 
         // Redeem should revert because strategy returns 1 less than requested
         uint256 shares = vault.balanceOf(alice);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(KanaVault.InsufficientWithdrawBalance.selector, 10_000e6, 10_000e6 - 1));
         vault.redeem(shares, alice, alice);
         vm.stopPrank();
     }
@@ -484,7 +484,7 @@ contract ShortchangingStrategy is IStrategy {
     function withdraw(uint256 amount) external override {
         // Shortchange by 1 wei — send less than requested
         uint256 actual = amount > 0 ? amount - 1 : 0;
-        totalDeposited -= actual;
+        totalDeposited -= amount;
         want.safeTransfer(msg.sender, actual);
     }
 

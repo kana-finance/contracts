@@ -443,8 +443,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             if (source.rewardToken != address(0) && source.swapPath.length >= 2) {
                 uint256 rewardBal = IERC20(source.rewardToken).balanceOf(address(this));
                 if (rewardBal > 0) {
-                    uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
-                    if (minOut > 0) _validateSlippage(rewardBal, minOut);
+                    uint256 minOut = minAmountsOut[i];
+                    _validateSlippage(rewardBal, minOut);
                     _swap(source.rewardToken, rewardBal, source.swapPath, minOut);
                 }
             }

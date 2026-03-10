@@ -540,6 +540,16 @@ contract SecurityImprovementsTest is Test {
         vm.prank(keeper);
         strategy.claimMorphoRewards(tokens, amounts, proofs, minAmountsOut);
     }
+
+    /// @notice M-1: harvest must revert when minAmountsOut length != yieldSources length
+    function test_M1_harvest_revertsWithWrongMinAmountsLength() public {
+        // Strategy has 3 yield sources; pass a 2-element array
+        uint256[] memory minAmounts = new uint256[](2);
+
+        vm.prank(address(vault));
+        vm.expectRevert(abi.encodeWithSelector(USDCStrategy.InvalidMinAmountsLength.selector));
+        strategy.harvest(minAmounts);
+    }
 }
 
 /// @notice Minimal merkl distributor mock: just transfers claimed amounts
