@@ -430,10 +430,10 @@ contract EdgeCasesTest is Test {
 
     // ─── H-1: InsufficientWithdrawBalance ────────────────────────────────
 
-    /// @notice H-1: Strategy that returns 1 less than requested must cause redeem to revert
+    /// @notice H-1: Strategy that shortchanges beyond rounding tolerance must cause redeem to revert
     function test_H1_withdrawRevertsWhenStrategyShortchanges() public {
-        // Deploy a strategy that shortchanges by 1 wei
-        ShortchangingStrategy shortStrat = new ShortchangingStrategy(address(usdc));
+        // Deploy a strategy that shortchanges by 3 wei (beyond the 2-wei tolerance)
+        ShortchangingStrategy shortStrat = new ShortchangingStrategy(address(usdc), 3);
         usdc.mint(address(shortStrat), 1_000_000e6);
 
         vm.prank(owner);
@@ -445,11 +445,55 @@ contract EdgeCasesTest is Test {
         usdc.approve(address(vault), type(uint256).max);
         vault.deposit(10_000e6, alice);
 
-        // Redeem should revert because strategy returns 1 less than requested
+        // Redeem should revert because strategy returns 3 less than requested (exceeds 2-wei tolerance)
         uint256 shares = vault.balanceOf(alice);
-        vm.expectRevert(abi.encodeWithSelector(KanaVault.InsufficientWithdrawBalance.selector, 10_000e6, 10_000e6 - 1));
+        vm.expectRevert(abi.encodeWithSelector(KanaVault.InsufficientWithdrawBalance.selector, 10_000e6, 10_000e6 - 3));
         vault.redeem(shares, alice, alice);
         vm.stopPrank();
+    }
+
+    /// @notice 1-wei rounding shortfall (within tolerance) must succeed; user receives assets - 1
+    function test_withdraw_tolerates_1wei_rounding() public {
+        ShortchangingStrategy shortStrat = new ShortchangingStrategy(address(usdc), 1);
+        usdc.mint(address(shortStrat), 1_000_000e6);
+
+        vm.prank(owner);
+        vault.setStrategy(IStrategy(address(shortStrat)));
+
+        usdc.mint(alice, 10_000e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.deposit(10_000e6, alice);
+
+        uint256 balanceBefore = usdc.balanceOf(alice);
+        uint256 shares = vault.balanceOf(alice);
+        // Should not revert — 1-wei shortfall is within tolerance
+        vault.redeem(shares, alice, alice);
+        vm.stopPrank();
+
+        // User receives 10_000e6 - 1 (clamped to actual balance)
+        assertEq(usdc.balanceOf(alice) - balanceBefore, 10_000e6 - 1);
+    }
+
+    /// @notice 2-wei rounding shortfall (at tolerance boundary) must succeed
+    function test_withdraw_tolerates_2wei_rounding() public {
+        ShortchangingStrategy shortStrat = new ShortchangingStrategy(address(usdc), 2);
+        usdc.mint(address(shortStrat), 1_000_000e6);
+
+        vm.prank(owner);
+        vault.setStrategy(IStrategy(address(shortStrat)));
+
+        usdc.mint(alice, 10_000e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.deposit(10_000e6, alice);
+
+        uint256 balanceBefore = usdc.balanceOf(alice);
+        uint256 shares = vault.balanceOf(alice);
+        vault.redeem(shares, alice, alice);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(alice) - balanceBefore, 10_000e6 - 2);
     }
 
 }
@@ -471,19 +515,22 @@ contract RevertingMorpho {
 
 // Reentrancy protection is inherent in ERC4626 due to no callbacks
 
-/// @notice Mock strategy that returns 1 less than requested (simulates protocol rounding shortchange)
+/// @notice Mock strategy that returns less than requested by a configurable amount
 contract ShortchangingStrategy is IStrategy {
     using SafeERC20 for IERC20;
     IERC20 public want;
     uint256 public totalDeposited;
+    uint256 public shortchangeBy;
 
-    constructor(address _want) { want = IERC20(_want); }
+    constructor(address _want, uint256 _shortchangeBy) {
+        want = IERC20(_want);
+        shortchangeBy = _shortchangeBy;
+    }
 
     function deposit(uint256 amount) external override { totalDeposited += amount; }
 
     function withdraw(uint256 amount) external override {
-        // Shortchange by 1 wei — send less than requested
-        uint256 actual = amount > 0 ? amount - 1 : 0;
+        uint256 actual = amount > shortchangeBy ? amount - shortchangeBy : 0;
         totalDeposited -= amount;
         want.safeTransfer(msg.sender, actual);
     }

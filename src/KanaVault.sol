@@ -202,11 +202,13 @@ contract KanaVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
             if (toWithdraw > 0) {
                 strategy.withdraw(toWithdraw);
             }
-            // Revert if strategy returned less than requested (H-1 fix)
+            // Revert if strategy returned significantly less than requested (H-1 fix).
+            // Allow up to 2 wei tolerance for unavoidable lending protocol rounding.
             uint256 actualBalance = IERC20(asset()).balanceOf(address(this));
-            if (actualBalance < assets) {
+            if (actualBalance + 2 < assets) {
                 revert InsufficientWithdrawBalance(assets, actualBalance);
             }
+            assets = Math.min(assets, actualBalance);
         }
 
         super._withdraw(caller, receiver, _owner, assets, shares);
