@@ -21,6 +21,7 @@ contract MockUSDC is ERC20 {
 contract MockRewardToken is ERC20 {
     constructor(string memory name, string memory symbol) ERC20(name, symbol) {}
     function mint(address to, uint256 amount) external { _mint(to, amount); }
+    function decimals() public pure override returns (uint8) { return 6; }
 }
 
 /// @notice Router that returns less than input (simulates bad price / MEV)
@@ -174,7 +175,7 @@ contract SlippageProtectionTest is Test {
 
         uint256[] memory minAmounts = new uint256[](3);
         minAmounts[0] = 0;     // Yei
-        minAmounts[1] = 970e6; // Takara
+        minAmounts[1] = 970e6; // Takara (USDC-denominated, after 18→6 normalization)
         minAmounts[2] = 0;     // Morpho
 
         vm.prank(vault);

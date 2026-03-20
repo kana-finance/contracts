@@ -22,6 +22,9 @@ interface IMetaMorpho {
     /// @notice Convert shares to assets
     function convertToAssets(uint256 shares) external view returns (uint256);
 
+    /// @notice Maximum assets that can be deposited for receiver (ERC-4626)
+    function maxDeposit(address receiver) external view returns (uint256);
+
     /// @notice Underlying asset address
     function asset() external view returns (address);
 }

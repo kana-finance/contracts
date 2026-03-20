@@ -170,6 +170,26 @@ contract KanaVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
         return 6; // Adds 1e6 virtual shares/assets
     }
 
+    /// @notice Returns 0 when paused per ERC-4626 spec
+    function maxDeposit(address) public view override returns (uint256) {
+        return paused() ? 0 : super.maxDeposit(address(0));
+    }
+
+    /// @notice Returns 0 when paused per ERC-4626 spec
+    function maxMint(address) public view override returns (uint256) {
+        return paused() ? 0 : super.maxMint(address(0));
+    }
+
+    /// @notice Returns 0 when paused per ERC-4626 spec
+    function maxWithdraw(address owner) public view override returns (uint256) {
+        return paused() ? 0 : super.maxWithdraw(owner);
+    }
+
+    /// @notice Returns 0 when paused per ERC-4626 spec
+    function maxRedeem(address owner) public view override returns (uint256) {
+        return paused() ? 0 : super.maxRedeem(owner);
+    }
+
     /// @dev After deposit, deploy funds to the strategy
     function _deposit(
         address caller,
@@ -208,7 +228,10 @@ contract KanaVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
             if (actualBalance + 2 < assets) {
                 revert InsufficientWithdrawBalance(assets, actualBalance);
             }
-            assets = Math.min(assets, actualBalance);
+            if (actualBalance < assets) {
+                assets = actualBalance;
+                shares = _convertToShares(assets, Math.Rounding.Ceil);
+            }
         }
 
         super._withdraw(caller, receiver, _owner, assets, shares);
