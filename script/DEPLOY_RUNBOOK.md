@@ -191,3 +191,34 @@ forge script script/DeploySEIMainnet.s.sol --rpc-url $SEI_RPC_URL
 ```
 
 Omitting `--broadcast` runs the script in simulation mode — Forge will report any reverts before any transactions are sent.
+
+---
+
+## Redeployment (Fund Migration)
+
+Use `RedeployAllV2.s.sol` when contract code has been updated and a full redeploy is needed. The script:
+
+1. Redeems all deployer shares from the old KanaVault and SEIVault
+2. Deploys fresh KanaVault + USDCStrategy and SEIVault + SEIStrategy
+3. Wires up keeper/guardian roles
+4. Re-deposits all rescued funds into the new vaults
+
+**Pre-redeploy checks:**
+- Confirm deployer is the only depositor (seed funds only)
+- Verify old vault addresses in the script match `.env`
+
+**Dry run:**
+```sh
+forge script script/RedeployAllV2.s.sol --rpc-url $SEI_RPC_URL
+```
+
+**Live run:**
+```sh
+forge script script/RedeployAllV2.s.sol --rpc-url $SEI_RPC_URL --broadcast
+```
+
+**After broadcast:**
+- Note the 4 new addresses from script output
+- Update `.env`: `KANA_VAULT_ADDRESS`, `USDC_STRATEGY_ADDRESS`, `SEI_VAULT_ADDRESS`, `SEI_STRATEGY_ADDRESS`
+- Run post-deploy `cast call` checks (Step 3 above) against the new addresses
+- Transfer ownership to multisig (Step 4 above)
