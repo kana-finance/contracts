@@ -9,6 +9,7 @@ import {IAToken} from "../interfaces/external/IAToken.sol";
 import {ICErc20} from "../interfaces/external/ICErc20.sol";
 import {IComptroller} from "../interfaces/external/IComptroller.sol";
 import {IMorpho} from "../interfaces/external/IMorpho.sol";
+import {IMetaMorpho} from "../interfaces/external/IMetaMorpho.sol";
 import {ISailorRouter} from "../interfaces/external/ISailorRouter.sol";
 
 /// @title MockAToken
@@ -110,26 +111,26 @@ contract MockYeiPool is IAavePool {
 /// @notice Mock cToken implementing ICErc20 interface for Takara testing
 contract MockCToken is ERC20, ICErc20 {
     using SafeERC20 for IERC20;
-    
+
     address public immutable override underlying;
     uint256 public override exchangeRateStored;
     uint256 public aprBps;
     uint256 public lastUpdateTime;
-    
+
     uint256 constant EXCHANGE_RATE_BASE = 1e18;
-    
+
     constructor(address _underlying, string memory name, string memory symbol) ERC20(name, symbol) {
         underlying = _underlying;
         exchangeRateStored = EXCHANGE_RATE_BASE;
         aprBps = 600; // 6% default APR
         lastUpdateTime = block.timestamp;
     }
-    
+
     function setApr(uint256 _aprBps) external {
         _accrueInterest();
         aprBps = _aprBps;
     }
-    
+
     function _accrueInterest() internal {
         uint256 elapsed = block.timestamp - lastUpdateTime;
         if (elapsed > 0 && totalSupply() > 0) {
@@ -140,35 +141,40 @@ contract MockCToken is ERC20, ICErc20 {
             lastUpdateTime = block.timestamp;
         }
     }
-    
+
     function mint(uint256 mintAmount) external override returns (uint256) {
         _accrueInterest();
         IERC20(underlying).safeTransferFrom(msg.sender, address(this), mintAmount);
-        
+
         uint256 cTokens = (mintAmount * EXCHANGE_RATE_BASE) / exchangeRateStored;
         _mint(msg.sender, cTokens);
         return 0; // 0 = success
     }
-    
+
     function redeemUnderlying(uint256 redeemAmount) external override returns (uint256) {
         _accrueInterest();
-        
+
         uint256 cTokens = (redeemAmount * EXCHANGE_RATE_BASE) / exchangeRateStored;
         _burn(msg.sender, cTokens);
         IERC20(underlying).safeTransfer(msg.sender, redeemAmount);
         return 0;
     }
-    
+
     // Override balanceOf to satisfy both ERC20 and ICErc20
     function balanceOf(address owner) public view override(ERC20, ICErc20) returns (uint256) {
         return super.balanceOf(owner);
     }
-    
+
     function balanceOfUnderlying(address owner) external override returns (uint256) {
         _accrueInterest();
         return (balanceOf(owner) * exchangeRateStored) / EXCHANGE_RATE_BASE;
     }
-    
+
+    function exchangeRateCurrent() external override returns (uint256) {
+        _accrueInterest();
+        return exchangeRateStored;
+    }
+
     function getApr() external view returns (uint256) {
         return aprBps;
     }
@@ -196,10 +202,11 @@ contract MockComptroller is IComptroller {
 /// @notice Mock Morpho protocol implementing IMorpho interface
 contract MockMorpho is IMorpho {
     using SafeERC20 for IERC20;
-    
+
     mapping(address => mapping(address => uint256)) public override supplyBalance;
     mapping(address => mapping(address => uint256)) public depositTime;
     mapping(address => uint256) public aprBps;
+    bool public shouldRevertOnWithdraw;
     
     function setApr(address asset, uint256 _aprBps) external {
         aprBps[asset] = _aprBps;
@@ -222,12 +229,17 @@ contract MockMorpho is IMorpho {
         return amount;
     }
     
+    function setShouldRevertOnWithdraw(bool _shouldRevert) external {
+        shouldRevertOnWithdraw = _shouldRevert;
+    }
+
     function withdraw(
         address asset,
         uint256 amount,
         address receiver,
         uint256
     ) external override returns (uint256) {
+        require(!shouldRevertOnWithdraw, "MockMorpho: withdrawal disabled");
         // Accrue interest first
         _accrueInterest(asset, msg.sender);
         
@@ -295,5 +307,68 @@ contract MockRouter is ISailorRouter {
     // Fund the router with tokens for testing
     function fund(address token, uint256 amount) external {
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+    }
+}
+
+/// @title MockMetaMorpho
+/// @notice Mock MetaMorpho ERC-4626 vault implementing IMetaMorpho
+contract MockMetaMorpho is ERC20, IMetaMorpho {
+    using SafeERC20 for IERC20;
+
+    IERC20 public immutable underlyingAsset;
+    bool public shouldRevertOnWithdraw;
+    uint256 public maxDepositAmount;
+
+    constructor(address _underlying, string memory name, string memory symbol) ERC20(name, symbol) {
+        underlyingAsset = IERC20(_underlying);
+        maxDepositAmount = type(uint256).max;
+    }
+
+    function setShouldRevertOnWithdraw(bool _shouldRevert) external {
+        shouldRevertOnWithdraw = _shouldRevert;
+    }
+
+    function setMaxDepositAmount(uint256 _maxDeposit) external {
+        maxDepositAmount = _maxDeposit;
+    }
+
+    function deposit(uint256 assets, address receiver) external override returns (uint256 shares) {
+        underlyingAsset.safeTransferFrom(msg.sender, address(this), assets);
+        shares = assets; // 1:1 for simplicity
+        _mint(receiver, shares);
+    }
+
+    function withdraw(uint256 assets, address receiver, address _owner) external override returns (uint256 shares) {
+        require(!shouldRevertOnWithdraw, "MockMetaMorpho: withdrawal disabled");
+        shares = assets; // 1:1 for simplicity
+        _burn(_owner, shares);
+        underlyingAsset.safeTransfer(receiver, assets);
+    }
+
+    function redeem(uint256 shares, address receiver, address _owner) external override returns (uint256 assets) {
+        require(!shouldRevertOnWithdraw, "MockMetaMorpho: withdrawal disabled");
+        assets = shares; // 1:1 for simplicity
+        _burn(_owner, shares);
+        underlyingAsset.safeTransfer(receiver, assets);
+    }
+
+    function totalAssets() external view override returns (uint256) {
+        return underlyingAsset.balanceOf(address(this));
+    }
+
+    function balanceOf(address account) public view override(ERC20, IMetaMorpho) returns (uint256) {
+        return super.balanceOf(account);
+    }
+
+    function convertToAssets(uint256 shares) external pure override returns (uint256) {
+        return shares; // 1:1
+    }
+
+    function maxDeposit(address) external view override returns (uint256) {
+        return maxDepositAmount;
+    }
+
+    function asset() external view override returns (address) {
+        return address(underlyingAsset);
     }
 }

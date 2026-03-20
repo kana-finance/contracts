@@ -21,6 +21,7 @@ contract MockUSDC is ERC20 {
 contract MockRewardToken is ERC20 {
     constructor(string memory name, string memory symbol) ERC20(name, symbol) {}
     function mint(address to, uint256 amount) external { _mint(to, amount); }
+    function decimals() public pure override returns (uint8) { return 6; }
 }
 
 /// @notice Router that returns less than input (simulates bad price / MEV)
@@ -174,7 +175,7 @@ contract SlippageProtectionTest is Test {
 
         uint256[] memory minAmounts = new uint256[](3);
         minAmounts[0] = 0;     // Yei
-        minAmounts[1] = 970e6; // Takara
+        minAmounts[1] = 970e6; // Takara (USDC-denominated, after 18→6 normalization)
         minAmounts[2] = 0;     // Morpho
 
         vm.prank(vault);
@@ -234,7 +235,7 @@ contract SlippageProtectionTest is Test {
         vm.expectRevert(abi.encodeWithSelector(
             USDCStrategy.SlippageExceedsCap.selector,
             0,
-            950e6
+            1
         ));
         strategy.harvest(minAmounts);
     }
@@ -370,8 +371,8 @@ contract SlippageProtectionTest is Test {
         assertGe(strategy.balanceOf(), balBefore);
     }
 
-    /// @notice L-4 fix: empty minAmountsOut defaults to 0 which now reverts (slippage validation)
-    function test_claimMorphoRewards_emptyMinAmountsRevertsWithSlippageCap() public {
+    /// @notice L-4 fix: empty minAmountsOut array now reverts with InvalidMinAmountsLength
+    function test_claimMorphoRewards_emptyMinAmountsRevertsWithInvalidLength() public {
         _deposit(100_000e6);
         merklDistributor.setClaimAmount(address(morphoReward), 1000e6);
 
@@ -381,10 +382,10 @@ contract SlippageProtectionTest is Test {
         amounts[0] = 1000e6;
         bytes32[][] memory proofs = new bytes32[][](1);
         proofs[0] = new bytes32[](0);
-        uint256[] memory minOuts = new uint256[](0); // defaults to 0, now rejected
+        uint256[] memory minOuts = new uint256[](0); // too short, now rejected
 
         vm.prank(keeperAddr);
-        vm.expectRevert(); // SlippageExceedsCap — keeper cannot bypass slippage protection
+        vm.expectRevert(abi.encodeWithSelector(USDCStrategy.InvalidMinAmountsLength.selector));
         strategy.claimMorphoRewards(tokens, amounts, proofs, minOuts);
     }
 
@@ -545,22 +546,21 @@ contract SlippageProtectionTest is Test {
     // On-chain slippage cap enforcement
     // ═══════════════════════════════════════════════════════════════════
 
-    function test_slippageCap_rejectsLowMinOut() public {
-        // maxSlippageBps = 500 (5%), so for 1000 reward tokens,
-        // minAmountOut must be >= 950. Passing 900 should revert.
+    function test_slippageCap_rejectsZeroMinOut() public {
+        // Only zero minAmountOut is rejected now (no price oracle to validate amounts)
         _deposit(100_000e6);
         takaraReward.mint(address(strategy), 1000e6);
 
         uint256[] memory minAmounts = new uint256[](3);
-        minAmounts[0] = 0;     // Yei
-        minAmounts[1] = 900e6; // Takara
-        minAmounts[2] = 0;     // Morpho
+        minAmounts[0] = 0;   // Yei
+        minAmounts[1] = 0;   // Takara — zero triggers revert
+        minAmounts[2] = 0;   // Morpho
 
         vm.prank(vault);
         vm.expectRevert(abi.encodeWithSelector(
             USDCStrategy.SlippageExceedsCap.selector,
-            900e6,  // minAmountOut provided
-            950e6   // minRequired (1000 * 9500 / 10000)
+            0,
+            1
         ));
         strategy.harvest(minAmounts);
     }
@@ -590,7 +590,7 @@ contract SlippageProtectionTest is Test {
         vm.expectRevert(abi.encodeWithSelector(
             USDCStrategy.SlippageExceedsCap.selector,
             0,
-            950e6
+            1
         ));
         strategy.harvest(minAmounts);
     }

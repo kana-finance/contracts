@@ -21,6 +21,9 @@ interface ICErc20 {
     /// @return The exchange rate (scaled by 1e18)
     function exchangeRateStored() external view returns (uint256);
 
+    /// @notice Accrue interest then return the up-to-date exchange rate
+    function exchangeRateCurrent() external returns (uint256);
+
     /// @notice Get the cToken balance of an account
     function balanceOf(address owner) external view returns (uint256);
 

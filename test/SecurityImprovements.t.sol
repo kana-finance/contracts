@@ -532,10 +532,11 @@ contract SecurityImprovementsTest is Test {
         uint256[] memory minAmountsOut = new uint256[](1);
         minAmountsOut[0] = 0;
 
+        // _validateSlippage now only checks minAmountOut > 0 (no decimal normalization)
         vm.expectRevert(abi.encodeWithSelector(
             USDCStrategy.SlippageExceedsCap.selector,
             0,
-            (1000e18 * (10000 - 500)) / 10000
+            1
         ));
         vm.prank(keeper);
         strategy.claimMorphoRewards(tokens, amounts, proofs, minAmountsOut);

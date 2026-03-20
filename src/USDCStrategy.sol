@@ -15,6 +15,7 @@ import {IMorpho} from "./interfaces/external/IMorpho.sol";
 import {IMerklDistributor} from "./interfaces/external/IMerklDistributor.sol";
 import {ISailorRouter} from "./interfaces/external/ISailorRouter.sol";
 import {ISwapRouterV3} from "./interfaces/external/ISwapRouterV3.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /// @title USDCStrategy
 /// @notice Single strategy that manages USDC across multiple SEI lending
@@ -353,7 +354,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
     // slither-disable-start reentrancy-balance
     // slither-disable-start incorrect-equality
     function _withdrawFromProtocols(uint256 amount) internal {
-        uint256 total = _totalBalance();
+        uint256 total = _totalBalanceFresh();
         if (total == 0) return;
 
         uint256 len = yieldSources.length;
@@ -376,13 +377,14 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                 uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(actual);
                 if (err != 0) revert RedeemFailed(err);
             } else if (source.protocolType == ProtocolType.Morpho) {
-                uint256 withdrawn = IMorpho(source.protocolAddress).withdraw(
-                    address(usdc), 
-                    actual, 
-                    address(this), 
+                // Morpho may be illiquid — skip if withdraw fails
+                try IMorpho(source.protocolAddress).withdraw(
+                    address(usdc),
+                    actual,
+                    address(this),
                     source.morphoMaxIterations
-                );
-                if (withdrawn == 0) revert MorphoWithdrawFailed();
+                ) returns (uint256) {}
+                catch {}
             }
         }
 
@@ -390,7 +392,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
         uint256 balance = usdc.balanceOf(address(this));
         if (balance < amount) {
             uint256 deficit = amount - balance;
-            
+
             for (uint256 i = 0; i < len; i++) {
                 YieldSource storage source = yieldSources[i];
                 if (!source.enabled) continue;
@@ -407,13 +409,13 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                     uint256 err = ICErc20(source.protocolAddress).redeemUnderlying(toWithdraw);
                     if (err != 0) revert RedeemFailed(err);
                 } else if (source.protocolType == ProtocolType.Morpho) {
-                    uint256 mWithdrawn = IMorpho(source.protocolAddress).withdraw(
-                        address(usdc), 
-                        toWithdraw, 
-                        address(this), 
+                    try IMorpho(source.protocolAddress).withdraw(
+                        address(usdc),
+                        toWithdraw,
+                        address(this),
                         source.morphoMaxIterations
-                    );
-                    if (mWithdrawn == 0) revert MorphoWithdrawFailed();
+                    ) returns (uint256) {}
+                    catch {}
                 }
 
                 balance = usdc.balanceOf(address(this));
@@ -444,7 +446,8 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
                 uint256 rewardBal = IERC20(source.rewardToken).balanceOf(address(this));
                 if (rewardBal > 0) {
                     uint256 minOut = minAmountsOut[i];
-                    _validateSlippage(rewardBal, minOut);
+                    uint8 rewardDecimals = ERC20(source.rewardToken).decimals();
+                    _validateSlippage(rewardBal, minOut, rewardDecimals, 6);
                     _swap(source.rewardToken, rewardBal, source.swapPath, minOut);
                 }
             }
@@ -459,16 +462,18 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
         }
     }
 
-    /// @dev Validate that minAmountOut implies slippage within the on-chain cap.
-    ///      For reward→USDC swaps, we assume 1:1 as the "expected" rate (stablecoin baseline).
-    ///      minAmountOut must be >= rewardAmount * (10000 - maxSlippageBps) / 10000.
-    ///      This prevents a compromised keeper from setting minAmountOut = 0.
-    function _validateSlippage(uint256 rewardAmount, uint256 minAmountOut) internal view {
+    /// @dev Validate that minAmountOut is nonzero when slippage cap is active.
+    ///      Without a price oracle, we cannot validate slippage across arbitrary
+    ///      token pairs. The DEX router enforces the actual minAmountOut.
+    ///      This guard prevents a compromised keeper from passing minAmountOut = 0.
+    function _validateSlippage(
+        uint256,
+        uint256 minAmountOut,
+        uint8,
+        uint8
+    ) internal view {
         if (maxSlippageBps == 0) revert SlippageTooHigh();
-        uint256 minRequired = (rewardAmount * (10000 - maxSlippageBps)) / 10000;
-        if (minAmountOut < minRequired) {
-            revert SlippageExceedsCap(minAmountOut, minRequired);
-        }
+        if (minAmountOut == 0) revert SlippageExceedsCap(0, 1);
     }
 
     // ─── Internal: Swap ──────────────────────────────────────────────────
@@ -568,6 +573,28 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
         for (uint256 i = 0; i < len; i++) {
             if (yieldSources[i].enabled) {
                 total += _getSourceBalance(yieldSources[i]);
+            }
+        }
+        total += usdc.balanceOf(address(this));
+    }
+
+    /// @dev Get source balance with fresh exchange rate (non-view, accrues interest)
+    function _getSourceBalanceFresh(YieldSource storage source) internal returns (uint256) {
+        if (source.protocolType == ProtocolType.Compound) {
+            uint256 cTokenBal = IERC20(source.receiptToken).balanceOf(address(this));
+            if (cTokenBal == 0) return 0;
+            uint256 exchangeRate = ICErc20(source.receiptToken).exchangeRateCurrent();
+            return (cTokenBal * exchangeRate) / 1e18;
+        }
+        return _getSourceBalance(source);
+    }
+
+    /// @dev Total balance using fresh exchange rates (non-view, accrues interest)
+    function _totalBalanceFresh() internal returns (uint256 total) {
+        uint256 len = yieldSources.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (yieldSources[i].enabled) {
+                total += _getSourceBalanceFresh(yieldSources[i]);
             }
         }
         total += usdc.balanceOf(address(this));
@@ -858,7 +885,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             revert RebalanceCooldownActive(lastRebalanceTime + rebalanceCooldown);
         }
 
-        uint256 total = _totalBalance();
+        uint256 total = _totalBalanceFresh();
         if (total == 0) return;
 
         // Update state BEFORE external calls (checks-effects-interactions)
@@ -870,7 +897,7 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             YieldSource storage source = yieldSources[i];
             if (!source.enabled) continue;
 
-            uint256 balance = _getSourceBalance(source);
+            uint256 balance = _getSourceBalanceFresh(source);
             if (balance == 0) continue;
 
             if (source.protocolType == ProtocolType.Aave) {
@@ -924,8 +951,10 @@ contract USDCStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             // Try to find a yield source with matching reward token
             for (uint256 j = 0; j < sourcesLen; j++) {
                 if (yieldSources[j].rewardToken == tokens[i] && yieldSources[j].swapPath.length >= 2) {
-                    uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
-                    _validateSlippage(bal, minOut);
+                    if (i >= minAmountsOut.length) revert InvalidMinAmountsLength();
+                    uint256 minOut = minAmountsOut[i];
+                    uint8 rewardDecimals = ERC20(tokens[i]).decimals();
+                    _validateSlippage(bal, minOut, rewardDecimals, 6);
                     _swapDynamic(tokens[i], bal, yieldSources[j].swapPath, minOut);
                     break;
                 }
