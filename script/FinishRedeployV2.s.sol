@@ -11,7 +11,7 @@ pragma solidity ^0.8.20;
 //   4. Verify all wiring
 //
 // Pre-conditions (already completed before running this):
-//   - 2,100,260 USDC sitting in deployer wallet from old KanaVault rescue
+//   - Rescued USDC sitting in deployer wallet from old KanaVault rescue
 
 import {Script, console} from "forge-std/Script.sol";
 import {KanaVault} from "../src/KanaVault.sol";
@@ -63,9 +63,6 @@ contract FinishRedeployV2 is Script {
 
     // ─── Old Vault ───────────────────────────────────────────────────────────────
     address constant OLD_SEI_VAULT = 0x3468982893352808d1e248b98A1c5bab0f2833BC;
-
-    // ─── Previously rescued USDC (from manual redemption) ───────────────────────
-    uint256 constant RESCUED_USDC = 2_100_260;
 
     KanaVault    public newKanaVault;
     USDCStrategy public newUSDCStrategy;
@@ -121,9 +118,11 @@ contract FinishRedeployV2 is Script {
         newUSDCStrategy.setKeeper(deployer);
         newUSDCStrategy.setGuardian(guardian);
 
-        IERC20(USDC).approve(address(newKanaVault), RESCUED_USDC);
-        newKanaVault.deposit(RESCUED_USDC, deployer);
-        console.log("USDC deposited into new vault:", RESCUED_USDC);
+        uint256 rescuedUsdc = IERC20(USDC).balanceOf(deployer);
+        require(rescuedUsdc > 0, "No USDC in deployer wallet");
+        IERC20(USDC).approve(address(newKanaVault), rescuedUsdc);
+        newKanaVault.deposit(rescuedUsdc, deployer);
+        console.log("USDC deposited into new vault:", rescuedUsdc);
 
         // ─── Phase C: Rescue WSEI from old vault ────────────────────────────────
         console.log("");
