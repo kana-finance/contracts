@@ -454,26 +454,18 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
         }
     }
 
-    /// @dev Validate that minAmountOut implies slippage within the on-chain cap.
-    ///      Normalizes reward amount to asset decimals before comparison.
-    ///      This prevents a compromised keeper from setting minAmountOut = 0.
+    /// @dev Validate that minAmountOut is nonzero when slippage cap is active.
+    ///      Without a price oracle, we cannot validate slippage across arbitrary
+    ///      token pairs. The DEX router enforces the actual minAmountOut.
+    ///      This guard prevents a compromised keeper from passing minAmountOut = 0.
     function _validateSlippage(
-        uint256 rewardAmount,
+        uint256,
         uint256 minAmountOut,
-        uint8 rewardDecimals,
-        uint8 assetDecimals
+        uint8,
+        uint8
     ) internal view {
         if (maxSlippageBps == 0) revert SlippageTooHigh();
-        uint256 normalizedReward = rewardAmount;
-        if (rewardDecimals > assetDecimals) {
-            normalizedReward = rewardAmount / (10 ** (rewardDecimals - assetDecimals));
-        } else if (assetDecimals > rewardDecimals) {
-            normalizedReward = rewardAmount * (10 ** (assetDecimals - rewardDecimals));
-        }
-        uint256 minRequired = (normalizedReward * (10000 - maxSlippageBps)) / 10000;
-        if (minAmountOut < minRequired) {
-            revert SlippageExceedsCap(minAmountOut, minRequired);
-        }
+        if (minAmountOut == 0) revert SlippageExceedsCap(0, 1);
     }
 
     // ─── Internal: Swap ──────────────────────────────────────────────────
@@ -950,7 +942,8 @@ contract SEIStrategy is IStrategy, Ownable, Pausable, ReentrancyGuard {
             // Try to find a yield source with matching reward token
             for (uint256 j = 0; j < sourcesLen; j++) {
                 if (yieldSources[j].rewardToken == tokens[i] && yieldSources[j].swapPath.length >= 2) {
-                    uint256 minOut = i < minAmountsOut.length ? minAmountsOut[i] : 0;
+                    if (i >= minAmountsOut.length) revert InvalidMinAmountsLength();
+                    uint256 minOut = minAmountsOut[i];
                     uint8 rewardDecimals = ERC20(tokens[i]).decimals();
                     _validateSlippage(bal, minOut, rewardDecimals, 18);
                     _swapDynamic(tokens[i], bal, yieldSources[j].swapPath, minOut);

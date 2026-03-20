@@ -152,7 +152,7 @@ contract SEIStrategyAuditFixesTest is Test {
         assertGt(wsei.balanceOf(address(this)), 0);
     }
 
-    // ─── SEI-F002: Slippage decimal normalization ──────────────────────────
+    // ─── SEI-F002: Slippage validation (nonzero check only) ────────────────
 
     function test_SEI_F002_slippageValidationWithDifferentDecimals() public {
         MockRewardToken18 reward18 = new MockRewardToken18();
@@ -174,11 +174,41 @@ contract SEIStrategyAuditFixesTest is Test {
 
         vault.deposit(100 ether, address(this));
 
-        // With 18-decimal reward and 18-decimal asset (WSEI), 1:1 normalization
-        // minAmountOut of 0.95 ether should pass with 5% slippage cap
+        // Any nonzero minAmountOut passes _validateSlippage; DEX router enforces the real bound
         uint256[] memory minAmountsOut = new uint256[](3);
         minAmountsOut[0] = 0;
-        minAmountsOut[1] = 0.95 ether; // Valid: within 5% slippage of 1 ether
+        minAmountsOut[1] = 0.95 ether;
+        minAmountsOut[2] = 0;
+
+        vault.setKeeper(address(this));
+        vault.harvest(minAmountsOut);
+    }
+
+    /// @notice Regression: volatile 18-decimal reward token with low-value minAmountOut succeeds
+    function test_SEI_F002_volatileRewardTokenDoesNotDoS() public {
+        MockRewardToken18 reward18 = new MockRewardToken18();
+
+        address[] memory swapPath = new address[](2);
+        swapPath[0] = address(reward18);
+        swapPath[1] = address(wsei);
+        strategy.setYieldSourceRewardConfig(1, address(reward18), swapPath);
+
+        // 1000 tokens of a volatile reward worth ~$0.001 each
+        reward18.mint(address(strategy), 1000 ether);
+
+        // Fund router with enough WSEI for the 1:1 raw-amount mock swap
+        wsei.mint(address(this), 1100 ether);
+        wsei.approve(address(router), 1100 ether);
+        router.fund(address(wsei), 1100 ether);
+        reward18.mint(address(router), 2000 ether);
+
+        vault.deposit(100 ether, address(this));
+
+        // With old normalization this would require minAmountOut >= 950 WSEI (DoS).
+        // Now any nonzero value passes; DEX enforces the actual bound.
+        uint256[] memory minAmountsOut = new uint256[](3);
+        minAmountsOut[0] = 0;
+        minAmountsOut[1] = 1; // Realistic low-value output, nonzero
         minAmountsOut[2] = 0;
 
         vault.setKeeper(address(this));
@@ -282,24 +312,23 @@ contract USDCStrategyAuditFixesTest is Test {
         // Mint reward tokens to strategy (1e18 = 1 token with 18 decimals)
         reward18.mint(address(strategy), 1 ether);
 
-        // Fund router (mock does 1:1 raw amount swap, so needs enough USDC for 1e18 output)
-        usdc.mint(address(router), 1 ether); // 1e18 raw units of USDC
+        // Fund router
+        usdc.mint(address(router), 1 ether);
         reward18.mint(address(router), 10 ether);
 
         vault.deposit(100_000e6, address(this));
 
-        // 1e18 reward with 18 decimals normalized to 6 decimals = 1e6
-        // 5% slippage of 1e6 = minRequired = 0.95e6 = 950000
+        // Any nonzero minAmountOut passes _validateSlippage; DEX router enforces the real bound
         uint256[] memory minAmountsOut = new uint256[](3);
         minAmountsOut[0] = 0;
-        minAmountsOut[1] = 950_000; // 0.95 USDC — within 5% slippage
+        minAmountsOut[1] = 950_000; // 0.95 USDC
         minAmountsOut[2] = 0;
 
         vault.setKeeper(address(this));
         vault.harvest(minAmountsOut);
     }
 
-    function test_USDC_F001_slippageTooHighWithDecimalMismatch_reverts() public {
+    function test_USDC_F001_slippageZeroMinOut_reverts() public {
         MockRewardToken18 reward18 = new MockRewardToken18();
 
         address[] memory swapPath = new address[](2);
@@ -311,14 +340,47 @@ contract USDCStrategyAuditFixesTest is Test {
 
         vault.deposit(100_000e6, address(this));
 
-        // minAmountOut too low (below 5% slippage threshold after normalization)
+        // Only zero minAmountOut reverts now (no decimal normalization)
         uint256[] memory minAmountsOut = new uint256[](3);
         minAmountsOut[0] = 0;
-        minAmountsOut[1] = 100_000; // 0.1 USDC — way below 0.95 USDC min
+        minAmountsOut[1] = 0; // Zero triggers revert
         minAmountsOut[2] = 0;
 
         vault.setKeeper(address(this));
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(
+            USDCStrategy.SlippageExceedsCap.selector,
+            0,
+            1
+        ));
+        vault.harvest(minAmountsOut);
+    }
+
+    /// @notice Regression: volatile 18-decimal reward with low-value minAmountOut succeeds
+    function test_USDC_F001_volatileRewardTokenDoesNotDoS() public {
+        MockRewardToken18 reward18 = new MockRewardToken18();
+
+        address[] memory swapPath = new address[](2);
+        swapPath[0] = address(reward18);
+        swapPath[1] = address(usdc);
+        strategy.setYieldSourceRewardConfig(1, address(reward18), swapPath);
+
+        // 1000 tokens of a volatile reward worth ~$0.001 each
+        reward18.mint(address(strategy), 1000 ether);
+
+        // Fund router with enough USDC for the 1:1 raw-amount mock swap (1000e18 raw units)
+        usdc.mint(address(router), 1100 ether);
+        reward18.mint(address(router), 2000 ether);
+
+        vault.deposit(100_000e6, address(this));
+
+        // With old normalization, minRequired would be ~950e6 USDC (DoS for cheap tokens).
+        // Now any nonzero value passes; DEX enforces the actual bound.
+        uint256[] memory minAmountsOut = new uint256[](3);
+        minAmountsOut[0] = 0;
+        minAmountsOut[1] = 1; // Realistic low-value output, nonzero
+        minAmountsOut[2] = 0;
+
+        vault.setKeeper(address(this));
         vault.harvest(minAmountsOut);
     }
 
